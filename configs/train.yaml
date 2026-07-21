@@ -1,0 +1,236 @@
+# =============================================================================
+# train.yaml -- TRAINING configuration (INNER / in-distribution ranges)
+# =============================================================================
+# Every tunable in the training loop lives here. No magic numbers in code.
+#
+# The `domain.train` block below defines the INNER ranges the policy trains on.
+# The held-out OUTER (OOD) ranges live in `eval_ood.yaml` and are asserted at
+# load time to NOT overlap these. See env/config.py::assert_no_train_ood_overlap.
+#
+# NOTE: gravity is NEVER randomized in this project (see CLAUDE.md principle 7).
+#       Payload mass is the dynamics axis. There is deliberately no gravity key.
+# =============================================================================
+
+schema_version: 1
+seed: 42
+
+experiment:
+  name: "robust-transport-nav"
+  run_name: null              # null -> auto-generated from timestamp + seed
+  notes: ""
+  tags: ["phase1", "reward_v1"]
+
+# ---------------------------------------------------------------------------
+# Phase / feature flags. Flip these to enable study axes WITHOUT editing code.
+# ---------------------------------------------------------------------------
+phases:
+  enable_slope: false          # Phase 2: sloped terrain axis
+  enable_sensor_noise: false   # Phase 4: depth dropout / noise axis
+  enable_reward_v2: false      # Phase 4: transport-aware reward terms
+  enable_inferred_payload: false  # Phase 5: drop payload_mass from observation
+
+# ---------------------------------------------------------------------------
+# Simulation / episode settings
+# ---------------------------------------------------------------------------
+sim:
+  dt: 0.005                    # physics step (s)
+  decimation: 4                # control steps per policy step -> policy dt = 0.02 s
+  device: "cuda:0"
+  use_fabric: true
+  # VERIFY ON A100: PhysX GPU buffer sizes may need raising for high num_envs.
+  physx:
+    solver_position_iteration_count: 4
+    solver_velocity_iteration_count: 0
+    gpu_max_rigid_contact_count: 8388608
+    gpu_found_lost_pairs_capacity: 2097152
+
+env:
+  num_envs: 2048
+  env_spacing: 12.0            # metres between parallel env origins
+  episode_length_s: 30.0       # timeout -> failure
+  goal_tolerance_m: 0.5        # distance at which goal counts as reached
+  collision_force_threshold: 1.0   # net contact force (N) counting as collision
+  min_start_goal_distance_m: 6.0   # reject trivially short episodes
+  terrain_size_m: 10.0         # side length of one env's terrain patch
+  grid_resolution_m: 0.25      # occupancy-grid cell size for terrain + solvability
+
+robot_config: "configs/robot.yaml"   # robot + sensor config lives separately
+
+# ---------------------------------------------------------------------------
+# Action space: continuous (linear vel, angular vel)
+# ---------------------------------------------------------------------------
+action:
+  lin_vel_range: [-0.5, 1.5]   # m/s  (limited reverse)
+  ang_vel_range: [-1.5, 1.5]   # rad/s
+  scale: 1.0                   # policy outputs in [-1, 1], rescaled to ranges above
+
+# ---------------------------------------------------------------------------
+# Observation composition. Toggle components on/off; order is fixed by
+# env/spaces.py (single source of truth) so checkpoints stay interpretable.
+# ---------------------------------------------------------------------------
+observations:
+  use_depth: true
+  use_goal_pose: true          # goal-relative direction (cos, sin) + distance
+  use_proprioception: true     # linear + angular velocity
+  use_payload_mass: true       # Phase 5 sets this false (inferred-payload study)
+  clip_range: [-10.0, 10.0]
+  normalize: true
+  # Observation-space normalizer for payload mass. MUST exceed the OOD ceiling
+  # (9.0 kg in eval_ood.yaml), not just the training ceiling -- otherwise heavy
+  # OOD payloads saturate and become indistinguishable to the policy, flattening
+  # the payload robustness curve for a representational rather than physical reason.
+  payload_mass_norm_kg: 12.0
+
+# ---------------------------------------------------------------------------
+# DOMAIN RANDOMIZATION -- INNER (TRAINING) RANGES.
+# These are the "in-distribution" ranges. Held-out OOD ranges: eval_ood.yaml.
+# Each entry is an inclusive [low, high] interval, sampled uniformly per episode.
+# ---------------------------------------------------------------------------
+domain:
+  train:
+    obstacle_density:   [0.2, 0.6]     # fraction of free cells seeded as obstacles
+    slope_angle_deg:    [0.0, 10.0]    # only applied when phases.enable_slope
+    friction_coeff:     [0.4, 0.9]     # ground static/dynamic friction
+    payload_mass_kg:    [1.0, 5.0]     # transported payload mass
+    depth_dropout_prob: [0.0, 0.05]    # "mild" sensor degradation
+    depth_noise_std:    [0.0, 0.02]    # "mild" sensor degradation (metres)
+
+  # Resample cadence. "episode" = new sample on every reset.
+  resample: "episode"
+
+# ---------------------------------------------------------------------------
+# Terrain generation (procedural, parameterized -- never hand-designed)
+# ---------------------------------------------------------------------------
+terrain:
+  obstacle_radius_range_m: [0.3, 0.7]
+  obstacle_height_m: 0.6
+  border_margin_m: 0.5         # keep obstacles off the outer edge
+  # obstacle_density is a NORMALIZED knob in [0,1], not a literal area fraction:
+  # density=1.0 maps to this much of the floor covered. A literal reading would
+  # make the OOD point density=0.9 mean 90% coverage -- trivially unsolvable, so
+  # the top of the sweep would measure the regeneration budget, not the policy.
+  max_obstacle_area_fraction: 0.30
+  # Isaac Lab clones one env prim across all envs, so the obstacle COUNT must be
+  # structurally identical everywhere. Each env gets this many obstacle prims;
+  # unused ones are parked below the floor and layout varies by re-posing them.
+  #
+  # THIS IS A SCENE-COST KNOB, NOT JUST A CAPACITY LIMIT.
+  # Total kinematic colliders = max_obstacles_per_env * env.num_envs.
+  # At 48 x 2048 that is ~98k bodies, which is already heavy on an A100 and may
+  # require raising sim.physx.gpu_* buffers. If PhysX errors or startup crawls,
+  # lower env.num_envs FIRST (1024 or 512) -- it costs wall-clock, not validity.
+  #
+  # TerrainFactory truncates generated layouts to this cap so the occupancy grid
+  # (and therefore the solvability guarantee) never describes obstacles the
+  # simulator cannot actually spawn.
+  # Budget check: 0.30 * 81 m^2 / (pi * 0.5^2 avg) ~= 31 obstacles -> 48 has headroom.
+  max_obstacles_per_env: 48
+  start_goal_clearance_m: 1.0  # keep start/goal cells obstacle-free
+  max_generation_attempts: 50  # solvability regeneration budget before widening
+  # NOTE: terrain is NOT built with isaaclab.terrains TerrainImporter. That API
+  # generates one shared sub-terrain grid, which cannot give each env its own
+  # per-episode obstacle layout and slope. Instead env/terrain_factory.py emits a
+  # pure-NumPy TerrainSpec (CPU, solvability-checked) and env/nav_env.py re-poses
+  # a fixed pool of kinematic prims per env. See nav_env.py "Design notes".
+
+solvability:
+  robot_radius_m: 0.35         # used to inflate obstacles before path search
+  connectivity: 8              # 4 or 8 connected grid for A*
+  require_clearance: true      # path must respect inflated obstacles
+
+# ---------------------------------------------------------------------------
+# REWARD. Every term is individually toggleable and individually weighted.
+# v1 terms are the default; v2 terms activate with phases.enable_reward_v2.
+# See env/reward.py for the reward-design failure history docstring.
+# ---------------------------------------------------------------------------
+reward:
+  version: "v1"                # "v1" | "v2"  (v2 also requires phases.enable_reward_v2)
+  terms:
+    goal_reached:
+      enabled: true
+      weight: 200.0
+    collision:
+      enabled: true
+      weight: 100.0            # applied as a NEGATIVE penalty in code
+    step_cost:
+      enabled: true
+      # Per policy step, negative in code. MUST satisfy:
+      #   collision.weight > step_cost.weight * (episode_length_s / policy_dt)
+      # i.e. 100 > 0.05 * 1500 = 75. Otherwise crashing early is cheaper than
+      # timing out and the policy learns to seek collisions. Checked at startup
+      # by RewardConfig.warn_on_degenerate_weights.
+      weight: 0.05
+    progress_shaping:
+      enabled: true
+      weight: 10.0             # * (prev_dist - curr_dist) in metres
+      clip_per_step: 1.0       # guard against teleport//reset spikes (metres)
+    # ---- v2 (transport-aware) ----
+    action_rate:
+      enabled: false
+      weight: 0.05             # penalizes |a_t - a_{t-1}|
+    jerk:
+      enabled: false
+      weight: 0.02             # penalizes payload-destabilizing accel changes
+    energy_under_load:
+      enabled: false
+      weight: 0.01             # scales with payload mass * |v| * dt
+  payload_mass_norm_kg: 5.0    # normalizer for energy term (top of training range)
+
+# ---------------------------------------------------------------------------
+# RL algorithm. PPO default; SAC behind a switch (lowest priority per CLAUDE.md).
+# ---------------------------------------------------------------------------
+algo:
+  name: "ppo"                  # "ppo" | "sac"
+  library: "rsl_rl"            # isolated in training/ppo_config.py so it can swap
+
+  ppo:
+    num_steps_per_env: 24
+    max_iterations: 3000
+    save_interval: 100
+    empirical_normalization: true
+    policy:
+      init_noise_std: 1.0
+      actor_hidden_dims: [512, 256, 128]
+      critic_hidden_dims: [512, 256, 128]
+      activation: "elu"
+    algorithm:
+      value_loss_coef: 1.0
+      use_clipped_value_loss: true
+      clip_param: 0.2
+      entropy_coef: 0.005
+      num_learning_epochs: 5
+      num_mini_batches: 4
+      learning_rate: 1.0e-3
+      schedule: "adaptive"
+      gamma: 0.99
+      lam: 0.95
+      desired_kl: 0.01
+      max_grad_norm: 1.0
+
+  sac:
+    # Lowest-priority path (CLAUDE.md). Kept minimal and explicit.
+    max_iterations: 3000
+    save_interval: 100
+    batch_size: 4096
+    replay_buffer_size: 1000000
+    learning_rate: 3.0e-4
+    gamma: 0.99
+    tau: 0.005
+    alpha: 0.2
+    learning_starts: 10000
+    actor_hidden_dims: [512, 256, 128]
+    critic_hidden_dims: [512, 256, 128]
+
+# ---------------------------------------------------------------------------
+# Logging / checkpointing
+# ---------------------------------------------------------------------------
+logging:
+  wandb:
+    enabled: true
+    project: "robust-transport-nav"
+    entity: null               # null -> W&B default entity
+    mode: "online"             # "online" | "offline" | "disabled"
+  log_dir: "results/runs"
+  video: false                 # VERIFY ON A100: headless video capture needs a render camera
+  video_interval_iters: 500
+  video_length_steps: 300

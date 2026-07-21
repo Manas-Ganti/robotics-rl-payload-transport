@@ -1,0 +1,51 @@
+# =============================================================================
+# nav2_params.yaml -- classical baseline parameters
+# =============================================================================
+# These mirror Nav2's defaults (Regulated Pure Pursuit controller + grid-based
+# global planner) so the baseline is a fair representation of the classical
+# stack rather than a hand-tuned straw man.
+#
+# The baseline must be TUNED HONESTLY. If Nav2 fails in-distribution because of
+# a bad lookahead or an over-inflated costmap, the OOD comparison is worthless:
+# a broken baseline makes any policy look robust. Confirm Nav2 achieves a high
+# in-distribution success rate BEFORE reading anything into the OOD columns.
+# =============================================================================
+
+nav2:
+  # "inproc_planner" : A* + pure pursuit in-process, batched, no ROS 2 (default)
+  # "ros2_bridge"    : drive the real Nav2 stack over ROS 2 (see nav2_runner.py)
+  mode: "inproc_planner"
+
+  planner:
+    # Global replan cadence in POLICY steps (policy dt = 0.02 s -> 50 = 1 Hz,
+    # matching Nav2's default planner_server frequency).
+    replan_period_steps: 50
+    algorithm: "astar"           # matches Nav2 NavFn/Smac grid planning
+    allow_unknown: false
+
+  controller:
+    # Regulated Pure Pursuit. Defaults track Nav2's RPP plugin.
+    lookahead_distance_m: 0.6
+    max_lin_vel: 1.5             # keep equal to action.lin_vel_range max in train.yaml
+    max_ang_vel: 1.5             # keep equal to action.ang_vel_range max in train.yaml
+    goal_tolerance_m: 0.5        # keep equal to env.goal_tolerance_m in train.yaml
+    heading_gain: 2.0            # proportional gain on heading error
+    slow_down_angle_rad: 1.047   # 60 deg: full stop-and-turn beyond this error
+
+  costmap:
+    # Nav2 inflates obstacles by the robot footprint plus a safety margin.
+    # Deliberately slightly LARGER than solvability.robot_radius_m (0.35) --
+    # that is genuinely what Nav2 does, and shrinking it to gain success rate
+    # would be tuning the baseline to lose.
+    robot_radius_m: 0.40
+    inflation_radius_m: 0.55
+    cost_scaling_factor: 3.0
+    resolution_m: 0.25           # keep equal to env.grid_resolution_m in train.yaml
+
+  recovery:
+    # Nav2 ships recovery behaviours (spin, back up, clear costmap). The
+    # in-process mode implements only the costmap-clearing fallback, in
+    # Nav2Policy._plan. Note this asymmetry in the write-up: the real stack is
+    # somewhat MORE robust to getting stuck than the in-process stand-in.
+    enabled: false
+    max_retries: 3

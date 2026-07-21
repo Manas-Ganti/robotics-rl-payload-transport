@@ -1,0 +1,30 @@
+# Results are produced on the A100 and copied back; the directory is tracked
+# (results/.gitkeep) but its contents are not.
+results/*
+!results/.gitkeep
+
+# W&B
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Checkpoints / logs
+*.pt
+*.pth
+*.tfevents.*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Machine-local Claude Code settings
+.claude/settings.local.json

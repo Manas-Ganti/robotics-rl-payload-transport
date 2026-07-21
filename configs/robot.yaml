@@ -1,0 +1,100 @@
+# =============================================================================
+# robot.yaml -- ROBOT + SENSOR configuration
+# =============================================================================
+# The robot choice is ISOLATED here (CLAUDE.md: "Use an Isaac Lab built-in
+# mobile robot; do not model a custom robot"). To swap robots, change this file
+# only -- env/nav_env.py reads the asset path and joint names from here.
+# =============================================================================
+
+schema_version: 1
+
+robot:
+  name: "jetbot"
+  # Isaac Lab ships a differential-drive JetBot config:
+  #     from isaaclab_assets.robots.jetbot import JETBOT_CFG
+  # We reference it by import path so nav_env.py can resolve it dynamically.
+  #
+  # VERIFY ON A100: confirm this import path on the installed Isaac Lab version.
+  #   Isaac Lab 1.x : isaaclab_assets.robots.jetbot.JETBOT_CFG
+  #   Orbit (older) : omni.isaac.orbit_assets.jetbot.JETBOT_CFG
+  # Alternative built-in mobile bases if JetBot proves unsuitable:
+  #   isaaclab_assets.robots.carter.CARTER_CFG  (NVIDIA Carter, diff-drive)
+  cfg_import_path: "isaaclab_assets.robots.jetbot.JETBOT_CFG"
+
+  # Drivetrain -------------------------------------------------------------
+  drive_type: "differential"
+  wheel_radius_m: 0.0325
+  wheel_base_m: 0.118          # left-right wheel separation
+  # VERIFY ON A100: joint names must match the USD articulation exactly.
+  #   Inspect with: robot.joint_names  (after scene creation)
+  left_wheel_joint: "left_wheel_joint"
+  right_wheel_joint: "right_wheel_joint"
+  max_wheel_speed_rad_s: 40.0
+
+  # Spawn ------------------------------------------------------------------
+  spawn_height_m: 0.05
+  base_mass_kg: 2.5            # nominal chassis mass; payload adds on top
+  # Body/prim used for contact sensing and payload attachment.
+  # VERIFY ON A100: confirm the root body name in the JetBot USD.
+  base_body_name: "chassis"
+
+# ---------------------------------------------------------------------------
+# PAYLOAD -- the dynamics axis of this study (replaces gravity randomization).
+# Mass is sampled per episode from domain ranges in train.yaml / eval_ood.yaml.
+# ---------------------------------------------------------------------------
+payload:
+  enabled: true
+  attach_mode: "rigid_body_with_joint"   # "mass_modifier" | "rigid_body_with_joint"
+  # mass_modifier         : cheapest -- scales the base body's mass in-place.
+  # rigid_body_with_joint : physical box spawned on the chassis, fixed-jointed.
+  #                         Slower but produces real load-shift dynamics, which
+  #                         is what the transport-aware v2 reward cares about.
+  shape: "box"
+  size_m: [0.12, 0.12, 0.10]
+  offset_m: [0.0, 0.0, 0.08]   # relative to base_body_name origin
+  # VERIFY ON A100: rigid-body payload requires a FixedJoint between payload and
+  #                 chassis; see env/payload.py::attach_payload.
+
+# ---------------------------------------------------------------------------
+# SENSORS
+# ---------------------------------------------------------------------------
+sensors:
+  # Primary exteroceptive sensor. depth-only is fine for v1 (CLAUDE.md).
+  # "raycaster" is strongly preferred on A100: it is GPU-parallel across all
+  # envs and far cheaper than tiled cameras at num_envs=2048.
+  modality: "raycaster"        # "raycaster" (2D lidar-like) | "camera" (depth)
+
+  raycaster:
+    # VERIFY ON A100: isaaclab.sensors.RayCasterCfg + patterns.LidarPatternCfg
+    num_rays: 64
+    horizontal_fov_deg: 180.0  # forward-facing half-plane
+    max_range_m: 8.0
+    min_range_m: 0.05
+    height_offset_m: 0.10      # ray origin above chassis
+    update_period_s: 0.02      # match policy dt (sim.dt * decimation)
+
+  camera:
+    # Only used when modality == "camera".
+    # VERIFY ON A100: isaaclab.sensors.TiledCameraCfg is the performant option;
+    #                 plain CameraCfg will not scale to thousands of envs.
+    width: 64
+    height: 48
+    horizontal_fov_deg: 90.0
+    max_range_m: 8.0
+    data_type: "distance_to_image_plane"
+    update_period_s: 0.02
+
+  contact:
+    # Collision detection ground truth for termination + the collision metric.
+    # VERIFY ON A100: isaaclab.sensors.ContactSensorCfg; prim path must cover
+    #                 the chassis (and payload, if rigid-body attached).
+    enabled: true
+    history_length: 3
+    track_air_time: false
+
+  # Sensor degradation (Phase 4). Magnitudes come from the domain ranges;
+  # these flags control HOW the degradation is applied.
+  degradation:
+    dropout_fill_value: "max_range"   # "max_range" | "zero" | "last_valid"
+    noise_type: "gaussian"            # additive, std from domain ranges
+    apply_before_normalization: true
