@@ -9,35 +9,47 @@
 schema_version: 1
 
 robot:
-  name: "jetbot"
-  # Isaac Lab 2.x ships no JetBot config in isaaclab_assets; env/robots.py
-  # holds the definition from the official Isaac Lab tutorial, using NVIDIA's
-  # built-in JetBot USD. Resolved by import path so swapping robots stays a
-  # config edit.
-  cfg_import_path: "env.robots.JETBOT_CFG"
-  # null -> NVIDIA's Nucleus/S3 asset. Set a local .usd path here if compute
-  # nodes cannot reach the content server (download once on the login node).
+  # NVIDIA Carter (v1): a real differential-drive AMR, sized for the 1-9 kg
+  # payload axis. The JetBot was dropped after ARC smoke tests showed a 2 kg
+  # chassis on 3 cm wheels reaching 0.38 of 1.5 m/s and ~1% of the commanded
+  # turn rate under a 1-5 kg load -- the payload axis would have measured motor
+  # saturation, not transport. (JetBot values, for reference: nucleus_asset
+  # Robots/Jetbot/jetbot.usd, wheels left_wheel_joint/right_wheel_joint,
+  # radius 0.0325, separation 0.118, chassis body "chassis", 2.0 kg.)
+  #
+  # Values marked PENDING come from `arc/inspect_usd.py` on the login node and
+  # must be confirmed before the first Carter smoke test.
+  name: "carter_v1"
+  cfg_import_path: "env.robots.make_diff_drive_cfg"
+  nucleus_asset: "Robots/Carter/carter_v1.usd"   # PENDING: confirm HTTP 200 (4.5 layout)
+  # null -> NVIDIA's Nucleus/S3 asset. A local copy (downloaded on the login
+  # node) avoids depending on the content server during jobs.
   usd_path: null
 
   # Drivetrain -------------------------------------------------------------
   drive_type: "differential"
-  wheel_radius_m: 0.0325
-  wheel_base_m: 0.118          # left-right wheel separation
-  # VERIFY ON A100: joint names must match the USD articulation exactly.
-  #   Inspect with: robot.joint_names  (after scene creation)
-  left_wheel_joint: "left_wheel_joint"
-  right_wheel_joint: "right_wheel_joint"
-  max_wheel_speed_rad_s: 40.0
+  wheel_radius_m: 0.24         # PENDING
+  wheel_base_m: 0.54           # PENDING: left-right wheel separation
+  left_wheel_joint: "left_wheel"     # PENDING: exact USD joint names
+  right_wheel_joint: "right_wheel"   # PENDING
+  # Caps wheel speed; action.lin_vel_range tops out at 1.5 m/s = 1.5/r rad/s.
+  max_wheel_speed_rad_s: 7.0   # PENDING (depends on wheel_radius_m)
+  # Only the two wheels are actuated (casters stay passive). Velocity control:
+  # stiffness 0, damping = velocity gain; null keeps the USD's value.
+  actuator:
+    stiffness: 0.0
+    damping: null              # PENDING: USD drive damping from inspect_usd.py
+    effort_limit: null         # null -> USD maxForce
 
   # Spawn ------------------------------------------------------------------
-  spawn_height_m: 0.05
-  # The JetBot USD's chassis mass, as read back from PhysX on the first ARC
-  # smoke test. Used by the pure payload analysis (tip-over margin, mass
-  # ratio); the simulator itself uses the USD value and adds payload on top.
-  base_mass_kg: 2.0
-  # Body/prim used for contact sensing and payload attachment.
-  # VERIFY ON A100: confirm the root body name in the JetBot USD.
-  base_body_name: "chassis"
+  # Must be >= "root above lowest" from inspect_usd.py, or the wheels spawn
+  # inside the ground and PhysX ejects the robot. Too high only costs a short drop.
+  spawn_height_m: 0.30         # PENDING
+  # USD chassis mass; the pure payload analysis (tip-over, mass ratio) uses it.
+  # The simulator uses the USD value directly and adds the payload on top.
+  base_mass_kg: 25.0           # PENDING: chassis mass from inspect_usd.py / smoke test
+  # Body used for contact sensing + payload mass.
+  base_body_name: "chassis_link"   # PENDING
 
 # ---------------------------------------------------------------------------
 # PAYLOAD -- the dynamics axis of this study (replaces gravity randomization).
@@ -53,7 +65,7 @@ payload:
   #                         v2 jerk/energy terms as "protecting the payload".
   shape: "box"
   size_m: [0.12, 0.12, 0.10]
-  offset_m: [0.0, 0.0, 0.08]   # relative to base_body_name origin
+  offset_m: [0.0, 0.0, 0.30]   # relative to base_body_name origin (deck height; PENDING)
   # VERIFY ON A100: rigid-body payload requires a FixedJoint between payload and
   #                 chassis; see env/payload.py::attach_payload.
 

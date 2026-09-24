@@ -137,7 +137,11 @@ terrain:
   # a fixed pool of kinematic prims per env. See nav_env.py "Design notes".
 
 solvability:
-  robot_radius_m: 0.35         # used to inflate obstacles before path search
+  # Obstacles are inflated by this before the A* check, so it must be >= the
+  # robot's footprint radius (smoke test prints and checks it). PENDING for
+  # Carter: set from arc/inspect_usd.py "footprint radius"; keep the Nav2
+  # costmap radius (baselines/nav2_params.yaml) slightly larger.
+  robot_radius_m: 0.35
   connectivity: 8              # 4 or 8 connected grid for A*
   require_clearance: true      # path must respect inflated obstacles
 

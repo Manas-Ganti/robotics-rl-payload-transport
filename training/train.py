@@ -285,6 +285,30 @@ def setup_logging(cfg: Any, data: Dict[str, Any]) -> str:
     return log_dir
 
 
+def _robot_footprint_radius(prim_path: str = "/World/envs/env_0/Robot") -> Optional[float]:
+    """Half-diagonal of env_0's robot x-y bounding box (m), from the live stage.
+
+    Compared against solvability.robot_radius_m: the A* check inflates
+    obstacles by that radius, so a wider robot makes "solvable" a lie.
+    """
+    try:
+        import math
+
+        import omni.usd
+        from pxr import Usd, UsdGeom
+
+        stage = omni.usd.get_context().get_stage()
+        cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.guide]
+        )
+        box = cache.ComputeWorldBound(stage.GetPrimAtPath(prim_path)).ComputeAlignedRange()
+        size = box.GetMax() - box.GetMin()
+        return 0.5 * math.hypot(size[0], size[1]) * UsdGeom.GetStageMetersPerUnit(stage)
+    except Exception as exc:  # diagnostic only -- never fail the smoke test on it
+        print(f"  (footprint check unavailable: {exc})")
+        return None
+
+
 def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     """Phase 0 bring-up: random actions, then report what actually happened.
 
@@ -302,6 +326,17 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     import torch
 
     print(f"\n=== SMOKE TEST: {num_steps} random-action steps ===")
+    print(f"  joints : {env.robot.joint_names}")
+    print(f"  bodies : {env.robot.body_names}")
+    for name, act in env.robot.actuators.items():
+        print(
+            f"  actuator[{name}] joints={act.joint_names} stiffness={act.stiffness[0].tolist()} "
+            f"damping={act.damping[0].tolist()} effort_limit={act.effort_limit[0].tolist()}"
+        )
+    footprint = _robot_footprint_radius()
+    robot_radius_cfg = float(env._raw["solvability"]["robot_radius_m"])
+    if footprint is not None:
+        print(f"  footprint radius  : {footprint:.3f} m (solvability.robot_radius_m = {robot_radius_cfg:.3f})")
     obs, _ = env.reset()
 
     start_pos = env.robot.data.root_pos_w[:, :2].clone()
@@ -378,20 +413,38 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     # A wrong forward axis, swapped wheels, or a flipped wheel sign all still
     # "move" under random actions -- only commanded, isolated motions show them.
     obs, _ = env.reset()
+    z_spawn = env.robot.data.root_pos_w[:, 2].clone()
+    idle = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
+    max_tilt = 0.0
+    for _ in range(25):   # 0.5 s, no command: does it land and sit level?
+        env.step(idle)
+        g = env.robot.data.projected_gravity_b  # (N, 3); (0,0,-1) when level
+        tilt = torch.rad2deg(torch.acos(torch.clamp(-g[:, 2], -1.0, 1.0)))
+        max_tilt = max(max_tilt, float(tilt.max().item()))
+    drop = float((z_spawn - env.robot.data.root_pos_w[:, 2]).mean().item())
+    print(f"  spawn settle      : dropped {drop:+.3f} m, max tilt {max_tilt:.1f} deg (0.5 s idle)")
+
+    obs, _ = env.reset()
     yaw0 = env._robot_yaw().clone()
     xy0 = env.robot.data.root_pos_w[:, :2].clone()
     cmd = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
     cmd[:, 0] = 1.0                                   # full forward, no turn
     vx_sum = vy_sum = 0.0
-    for _ in range(50):
+    wheel_ids = env._wheel_joint_ids
+    for i in range(50):
         env.step(cmd)
         vx_sum += float(env.robot.data.root_lin_vel_b[:, 0].mean().item())
         vy_sum += float(env.robot.data.root_lin_vel_b[:, 1].abs().mean().item())
+        if i == 49:   # steady state: achieved vs targeted wheel speed
+            w_act = env.robot.data.joint_vel[:, wheel_ids].abs().mean().item()
+            w_tgt = env._last_wheel_targets.abs().mean().item()
     move = env.robot.data.root_pos_w[:, :2] - xy0
     heading = torch.stack([torch.cos(yaw0), torch.sin(yaw0)], dim=-1)
     along = float((move * heading).sum(-1).mean().item())
     lateral = float((move[:, 0] * heading[:, 1] - move[:, 1] * heading[:, 0]).abs().mean().item())
     cmd_v = float(env.commands[:, 0].mean().item())
+    print(f"  wheel tracking    : |target| {w_tgt:.2f} rad/s -> |achieved| {w_act:.2f} rad/s "
+          f"(ratio {w_act / max(w_tgt, 1e-6):.2f}; low -> motor too weak, ~1 but slow -> slip/radius)")
     print(f"  forward probe     : cmd {cmd_v:.2f} m/s -> body vx {vx_sum / 50:.2f}, |vy| {vy_sum / 50:.2f} m/s; "
           f"moved {along:+.2f} m along heading, {lateral:.2f} m sideways (1 s)")
 
@@ -458,6 +511,16 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
         print("  FAIL: most envs terminated on the very first step. That is ground")
         print("        contact being counted as collision -- check the filtered contact")
         print("        sensor (force_matrix_w) in _detect_collision.")
+    if footprint is not None and footprint > robot_radius_cfg + 0.05:
+        print("  FAIL: the robot is wider than solvability.robot_radius_m -- the A* check")
+        print("        certifies gaps the robot cannot fit through (unfair collisions).")
+        print("        Raise robot_radius_m (and nav2 costmap radius) to the footprint.")
+    if max_tilt > 30.0 or drop < -0.05:
+        print("  FAIL: robot tips or is ejected upward at spawn -- robot.spawn_height_m is")
+        print("        below the root's height above the wheels (see arc/inspect_usd.py).")
+    if w_act / max(w_tgt, 1e-6) < 0.7:
+        print("  FAIL: wheels reach < 70% of their target speed -- the wheel actuator is")
+        print("        too weak for the load (robot.actuator damping / effort_limit).")
     if along < 0.2:
         print("  FAIL: full-forward for 1 s moved < 0.2 m along the heading. Negative ->")
         print("        wheel sign flipped; ~0 with motion sideways -> the USD's forward")

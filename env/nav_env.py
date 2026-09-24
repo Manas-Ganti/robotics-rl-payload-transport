@@ -30,7 +30,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
@@ -97,7 +97,7 @@ class EpisodeRecord:
 # ---------------------------------------------------------------------------
 # Isaac Lab env configuration
 # ---------------------------------------------------------------------------
-def resolve_robot_cfg(import_path: str) -> ArticulationCfg:
+def resolve_robot_cfg(import_path: str, robot_yaml: Mapping[str, Any]) -> ArticulationCfg:
     """Dynamically import the built-in robot ArticulationCfg named in robot.yaml.
 
     Isolated so swapping robots is a config edit, never a code edit
@@ -121,7 +121,10 @@ def resolve_robot_cfg(import_path: str) -> ArticulationCfg:
 
     if not hasattr(module, attr):
         raise AttributeError(f"'{module_path}' has no attribute '{attr}'")
-    return getattr(module, attr)
+    target = getattr(module, attr)
+    # A factory (env.robots.make_diff_drive_cfg) is built from the robot YAML;
+    # a ready-made ArticulationCfg constant is returned as-is.
+    return target(robot_yaml) if callable(target) and not isinstance(target, ArticulationCfg) else target
 
 
 @configclass
@@ -200,11 +203,8 @@ def build_env_cfg(cfg: Config) -> TransportNavEnvCfg:
     )
 
     # -- robot -------------------------------------------------------------
-    base_robot_cfg = resolve_robot_cfg(str(robot_cfg["cfg_import_path"]))
+    base_robot_cfg = resolve_robot_cfg(str(robot_cfg["cfg_import_path"]), robot_cfg)
     out.robot = base_robot_cfg.replace(prim_path="/World/envs/env_.*/Robot")
-    if robot_cfg.get("usd_path"):
-        # Local copy of the asset, for compute nodes without content-server access.
-        out.robot.spawn = out.robot.spawn.replace(usd_path=str(robot_cfg["usd_path"]))
 
     # Per-actor solver iterations (Isaac Lab 2.x moved these off PhysxCfg). The
     # solver uses the max over actors, clamped to PhysxCfg's min/max range.
@@ -574,6 +574,7 @@ class TransportNavEnv(DirectRLEnv):
         factor = torch.where(peak > max_speed, max_speed / peak.clamp(min=1e-6), torch.ones_like(peak))
         wheel_targets = torch.stack([left * factor, right * factor], dim=-1)
 
+        self._last_wheel_targets = wheel_targets  # smoke-test tracking diagnostic
         self.robot.set_joint_velocity_target(wheel_targets, joint_ids=self._wheel_joint_ids)
 
     @property

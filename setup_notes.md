@@ -197,10 +197,12 @@ prints explicit `FAIL:` lines. **Run it first.**
 - [ ] **Isaac Lab import paths** — `isaaclab.*` vs legacy `omni.isaac.orbit.*`
       (`env/nav_env.py` top-level imports).
 - [ ] **Robot cfg import path** — `configs/robot.yaml: robot.cfg_import_path`
-      now `env.robots.JETBOT_CFG` — Isaac Lab 2.x ships no JetBot cfg, so
-      `env/robots.py` holds the official tutorial definition (NVIDIA's JetBot
-      USD, `activate_contact_sensors=True`). If compute nodes cannot fetch the
-      USD from Nucleus/S3, set `robot.usd_path` to a local copy.
+      now `env.robots.make_diff_drive_cfg`, a generic differential-drive
+      factory fed by robot.yaml (Isaac Lab 2.x ships no cfg for NVIDIA's
+      mobile bases). The robot is **Carter v1**; the JetBot was dropped after
+      smoke tests showed it could not move its 1–5 kg payload (0.38 of 1.5 m/s,
+      ~1% of commanded turn rate). Read every Carter value from the USD with
+      `arc/inspect_usd.py` on the login node before the first Carter run.
 - [ ] **Wheel joint names** — print `robot.joint_names`; reconcile with
       `robot.left_wheel_joint` / `right_wheel_joint`.
 - [ ] **Chassis body name** — `robot.base_body_name` must match the USD, or the
