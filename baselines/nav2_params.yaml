@@ -34,11 +34,11 @@ nav2:
 
   costmap:
     # Nav2 inflates obstacles by the robot footprint plus a safety margin.
-    # Deliberately slightly LARGER than solvability.robot_radius_m (0.35) --
+    # Deliberately slightly LARGER than solvability.robot_radius_m (0.55) --
     # that is genuinely what Nav2 does, and shrinking it to gain success rate
     # would be tuning the baseline to lose.
-    robot_radius_m: 0.40
-    inflation_radius_m: 0.55
+    robot_radius_m: 0.60
+    inflation_radius_m: 0.80      # ros2_bridge mode only; >= robot_radius_m
     cost_scaling_factor: 3.0
     resolution_m: 0.25           # keep equal to env.grid_resolution_m in train.yaml
 

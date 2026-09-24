@@ -17,39 +17,46 @@ robot:
   # Robots/Jetbot/jetbot.usd, wheels left_wheel_joint/right_wheel_joint,
   # radius 0.0325, separation 0.118, chassis body "chassis", 2.0 kg.)
   #
-  # Values marked PENDING come from `arc/inspect_usd.py` on the login node and
-  # must be confirmed before the first Carter smoke test.
+  # Geometry below was MEASURED from the USD's collision shapes with
+  # `arc/inspect_usd.py` on the ARC login node (2026-09-24).
   name: "carter_v1"
   cfg_import_path: "env.robots.make_diff_drive_cfg"
-  nucleus_asset: "Robots/Carter/carter_v1.usd"   # PENDING: confirm HTTP 200 (4.5 layout)
+  nucleus_asset: "Robots/Carter/carter_v1.usd"   # HTTP 200 on the 4.5 content server
+  # If usd_path is a local copy, its Props/ sub-files (carter_main,
+  # carter_wheel_left/right/center, carter_backwheel_caster) must sit next to
+  # it -- they hold the collision shapes. materials.usd is visual-only.
   # null -> NVIDIA's Nucleus/S3 asset. A local copy (downloaded on the login
   # node) avoids depending on the content server during jobs.
   usd_path: null
 
   # Drivetrain -------------------------------------------------------------
   drive_type: "differential"
-  wheel_radius_m: 0.24         # PENDING
-  wheel_base_m: 0.54           # PENDING: left-right wheel separation
-  left_wheel_joint: "left_wheel"     # PENDING: exact USD joint names
-  right_wheel_joint: "right_wheel"   # PENDING
-  # Caps wheel speed; action.lin_vel_range tops out at 1.5 m/s = 1.5/r rad/s.
-  max_wheel_speed_rad_s: 7.0   # PENDING (depends on wheel_radius_m)
+  # Collision cylinders measure 0.278 (left) / 0.271 (right); the mean is used.
+  # (NVIDIA's controller docs quote 0.24 -- but PhysX rolls on the collision
+  # shape, so the measurement is what the simulator actually does.)
+  wheel_radius_m: 0.2745
+  wheel_base_m: 0.5384         # between collision-cylinder centres
+  left_wheel_joint: "left_wheel"
+  right_wheel_joint: "right_wheel"
+  # Caps wheel speed; action.lin_vel_range tops out at 1.5 m/s = 1.5/0.2745.
+  max_wheel_speed_rad_s: 5.5
   # Only the two wheels are actuated (casters stay passive). Velocity control:
   # stiffness 0, damping = velocity gain; null keeps the USD's value.
   actuator:
     stiffness: 0.0
-    damping: null              # PENDING: USD drive damping from inspect_usd.py
-    effort_limit: null         # null -> USD maxForce
+    damping: null              # USD: 17453 (per-degree units), velocity-style drive
+    effort_limit: null         # USD maxForce = inf (unlimited torque)
 
   # Spawn ------------------------------------------------------------------
   # Must be >= "root above lowest" from inspect_usd.py, or the wheels spawn
   # inside the ground and PhysX ejects the robot. Too high only costs a short drop.
-  spawn_height_m: 0.30         # PENDING
-  # USD chassis mass; the pure payload analysis (tip-over, mass ratio) uses it.
-  # The simulator uses the USD value directly and adds the payload on top.
-  base_mass_kg: 25.0           # PENDING: chassis mass from inspect_usd.py / smoke test
+  spawn_height_m: 0.30         # root sits 0.288 m above the lowest collision point
+  # Whole-robot mass (chassis 45.9 + 20.0 ballast + wheels 8.4 + caster 1.8 +
+  # imu 0.1), for the pure payload analysis (tip-over, mass ratio). The sim
+  # uses the USD masses and adds the payload to chassis_link.
+  base_mass_kg: 76.2
   # Body used for contact sensing + payload mass.
-  base_body_name: "chassis_link"   # PENDING
+  base_body_name: "chassis_link"
 
 # ---------------------------------------------------------------------------
 # PAYLOAD -- the dynamics axis of this study (replaces gravity randomization).
