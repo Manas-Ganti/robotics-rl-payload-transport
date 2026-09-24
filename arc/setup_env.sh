@@ -97,6 +97,15 @@ install() {
   say "Isaac Sim $ISAACSIM_VERSION (pip; extscache avoids extension downloads on compute nodes)"
   "${PIP[@]}" "isaacsim[all,extscache]==$ISAACSIM_VERSION" --extra-index-url https://pypi.nvidia.com
 
+  # Isaac Lab pins flatdict==4.0.1, an sdist whose setup.py imports
+  # pkg_resources. pip's isolated build env pulls the newest setuptools, which
+  # no longer ships it -> "No module named 'pkg_resources'" and the CORE
+  # isaaclab package silently fails to install while its extensions succeed.
+  # Pre-build it against an older setuptools, without isolation.
+  say "flatdict pre-build (pkg_resources workaround)"
+  "${PIP[@]}" "setuptools<75"
+  "${PIP[@]}" flatdict==4.0.1 --no-build-isolation
+
   say "Isaac Lab $ISAACLAB_REF -> $ISAACLAB_DIR"
   if [[ ! -d "$ISAACLAB_DIR/.git" ]]; then
     git clone https://github.com/isaac-sim/IsaacLab.git "$ISAACLAB_DIR"
