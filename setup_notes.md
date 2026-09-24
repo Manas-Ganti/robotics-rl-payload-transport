@@ -1,65 +1,133 @@
-# A100 Setup & Verification Notes
+# VT ARC Setup & Verification Notes
 
-Everything that could not be verified on the code-writing machine, collected as
-an ordered checklist. Work through **Part 2 before launching any long run** —
-several items fail *silently*, and a silent failure here produces a complete,
-plausible-looking set of results for an experiment that never actually varied
-the thing it claims to study.
+Runtime is **VT ARC** (SLURM), on **NVIDIA L40S** nodes (48 GB, RT cores —
+a supported Isaac Sim GPU). A100 / H200 remain available as a headless-only
+fallback. Everything that could not be verified on the code-writing
+machine is collected here as an ordered checklist. Work through **Part 2
+before launching any long run** — several items fail *silently*, and a silent
+failure here produces a complete, plausible-looking set of results for an
+experiment that never actually varied the thing it claims to study.
+
+General ARC operating knowledge (QOS, mail, paste corruption, the zero-byte
+interpreter) comes from the VLM project's `arc_runbook.md` / `arc_quickref.md`.
+Where this project differs, this file wins.
 
 ---
 
-## Part 1 — Environment setup
+## Part 0 — Decisions (and why)
 
-### 1.1 Option A: Docker (recommended)
+| Decision | Choice | Why |
+|---|---|---|
+| GPU | **1 × L40S** per job | Has RT cores, so Isaac Sim is a *supported* config (rendering, cameras, video all work). A100/H200 have none — headless physics may run, but that is unsupported and rules out a camera sensor. 48 GB is ample for a single-GPU PhysX sim + ~400k-param MLP. Fallback: 1 × A100, headless only. |
+| Parallelism | **Job arrays, not multi-GPU** | Seeds are independent runs: `--array=0-2` → 3 one-GPU jobs that backfill separately. No NCCL, no DDP. |
+| QOS | the L40S partition's **short / highest-priority** QOS | Check the name (Part 1.1). On the A100s it was `*_normal_short`: highest priority, 24 h cap. Every job here fits under 24 h. |
+| Walltime | 8 h train / 4 h eval / 45 min smoke | Small + short is what backfills. A walltime kill is recoverable (`--resume auto`). |
+| Install | **pip Isaac Sim in a dedicated conda env** (`rtn`) | No Docker on ARC; no root needed; same absolute-path-env pattern already proven there. Apptainer is the fallback. |
+| Versions | Isaac Sim **4.5.0** · Isaac Lab **v2.1.0** · Python 3.10 · torch 2.5.1/cu121 | The code imports the Isaac Lab 2.x namespace (`isaaclab.*`). The earlier 4.2 / v1.4 pin used `omni.isaac.lab.*` and would have failed at import. |
 
-```bash
-docker login nvcr.io                      # NGC credentials required
-docker build -t robust-transport-nav .
+---
 
-docker run --name transport-nav --entrypoint bash -it --runtime=nvidia --gpus all \
-  -e "ACCEPT_EULA=Y" -e "PRIVACY_CONSENT=Y" \
-  -v $(pwd)/results:/workspace/robust-transport-nav/results:rw \
-  robust-transport-nav
-```
+## Part 1 — Environment setup (once, on the login node)
 
-The build runs `pytest tests/` and **fails the image** if the pure-logic tests
-fail — a broken train/OOD split cannot reach the A100 inside a green image.
+### 1.1 Account, partition, QOS
 
-### 1.2 Option B: native install
+The accounts are active (confirmed 2026-09). Launchers never hardcode one
+(public repo) — pass `--account=` on every `sbatch`.
 
-```bash
-# 1. Isaac Sim (Omniverse Launcher or NGC), then:
-export ISAACSIM_PATH=~/.local/share/ov/pkg/isaac-sim-4.2.0
-
-# 2. Isaac Lab, pinned to a tag
-git clone https://github.com/isaac-sim/IsaacLab.git && cd IsaacLab
-git checkout v1.4.0
-ln -s ${ISAACSIM_PATH} _isaac_sim
-./isaaclab.sh --install rsl_rl
-
-# 3. This project's deps INTO ISAAC SIM'S PYTHON (not the system python)
-cd /path/to/robotics-rl-payload-transport
-${ISAACSIM_PATH}/python.sh -m pip install -r requirements.txt
-```
-
-> **Do not `pip install torch`.** Isaac Sim ships its own build. Installing a
-> second one into that interpreter reliably breaks it.
-
-### 1.3 First checks
+The L40S names are **not yet confirmed** — the launchers assume
+`--partition=l40s_normal_q --gres=gpu:l40s:1` and set no QOS. Check once:
 
 ```bash
-# Pure-logic tests — no GPU, no Isaac. Run these FIRST.
-${ISAACSIM_PATH}/python.sh -m pytest tests/ -v
-
-# W&B
-wandb login
+sinfo -o "%P %G %D %N" | grep -i l40s                       # partition + gres string
+sacctmgr show qos format=name%32,priority,maxwall | grep -i l40s
+sacctmgr show assoc user=$USER format=account%30,partition%20,qos%80
 ```
+
+If the names differ, edit the two `#SBATCH` lines in `arc/train.slurm` and
+`arc/eval.slurm` (a wrong name fails loudly at submit — cheap). If a
+short/high-priority L40S QOS exists, add it to `S` below as `--qos=...`.
+
+**Which cluster?** If the L40S nodes live on a different ARC cluster than the
+A100s (e.g. Falcon vs Tinkercliffs), `sbatch` must be run from *that*
+cluster's login node, and `setup_env.sh` should be run there too — its glibc
+preflight is only meaningful on the OS the jobs will actually use.
+
+### 1.2 Checkout + install
+
+```bash
+bind 'set enable-bracketed-paste off'          # VS Code terminal paste corruption
+cd ~/ondemand/data
+git clone git@github.com:Manas-Ganti/robotics-rl-payload-transport.git
+cd robotics-rl-payload-transport
+
+bash arc/setup_env.sh --check                  # glibc, conda, free space, quota
+bash arc/setup_env.sh                          # ~30-60 min; idempotent, re-run on failure
+```
+
+`setup_env.sh` creates `~/miniconda3/envs/rtn`, installs torch → isaacsim →
+Isaac Lab → `requirements.txt`, then verifies with metadata checks and the
+pure-logic `pytest` suite. Override locations with `RTN_ENV=`, `CONDA_BIN=`,
+`ISAACLAB_DIR=` if needed.
+
+- **Never** reuse `vrr` / `vrr-train` / `vrr-gen`. Isaac Sim pins torch 2.5.1
+  and numpy < 2; crossing envs fails at import, late.
+- W&B: the launchers source `~/.config/vrr/secrets.env` (already holds the
+  W&B key and optional Telegram creds). Override with `RTN_SECRETS=`.
+
+**Disk (in `$HOME`, 640 GB quota, ~334 GB already used by the VLM project):**
+
+| Item | Size |
+|---|---|
+| `rtn` env (torch + isaacsim[all,extscache] + Isaac Lab) | ~30–35 GB |
+| Kit / shader / compute caches (`~/.cache/ov`, `~/.nv`) | ~5–10 GB |
+| Checkpoints (~5 MB each × 30 per run × ~10 runs) | ~1.5 GB |
+| Eval CSVs, W&B, SLURM logs | < 1 GB |
+| **Total** | **~40–50 GB** |
+
+### 1.3 Fallback: Apptainer (only if preflight fails on glibc)
+
+pip Isaac Sim needs glibc ≥ 2.34. If ARC's nodes are older, use Isaac Lab's
+documented cluster route (`docker/cluster/` in the Isaac Lab repo): build the
+image from this `Dockerfile` on a Docker-capable machine, `apptainer build` it
+into a `.sif`, copy to ARC, and in `arc/arc_env.sh` set `PY` to
+`apptainer exec --nv <sif> /isaac-sim/python.sh`. Not pre-wired — decide only
+if the preflight forces it.
+
+### 1.4 Branch discipline (two checkouts)
+
+Edit on the Mac, **push, then `git pull --ff-only` on ARC before submitting.**
+`.slurm` files are copied at *submit* time (a queued job ignores later edits);
+Python and `arc_env.sh` are read at *run* time (a pull under a pending job
+does take effect). The log line `[arc_env] git=<sha>` records what ran, and
+flags `(DIRTY)` if the ARC checkout had uncommitted edits.
 
 ---
 
 ## Part 2 — The verification checklist
 
 Ordered by *how badly a silent failure corrupts the study*, not by module.
+
+### ⚫ TIER 0 — does Isaac Sim start on the node? (smoke test 0a)
+
+On L40S this is a supported config, so this tier should pass — but a first
+launch on a new cluster can still fail on drivers, and it is cheaper to learn
+that at 64 envs / 45 min than at 2048 envs. (On the A100/H200 fallback the
+risk is real: no RT cores, rendering unsupported, headless physics only.)
+
+- [ ] Log reaches `=== Building environment ===` without a Vulkan / RTX /
+      `Failed to create any GPU devices` error.
+- [ ] If Kit dies on Vulkan: check the node has an NVIDIA ICD
+      (`srun --jobid=<id> --overlap ls /usr/share/vulkan/icd.d /etc/vulkan/icd.d`).
+      No ICD on compute nodes → ARC support ticket, or the Apptainer route
+      (`--nv` binds the driver's Vulkan libs).
+- [ ] `nvidia-smi` in the log header shows an **L40S** (not a fallback GPU).
+- [ ] Video is *possible* on L40S but **not wired**: the `logging.video*`
+      keys exist in `train.yaml` and nothing reads them yet. Once training
+      works, wiring it (`--enable_cameras` + a `RecordVideo` wrapper) is how
+      the portfolio gets its demo GIF.
+- [ ] First launch is slow (extension + shader cache build, 5–15 min). The
+      second smoke test should start noticeably faster; if not, the cache
+      dir is not persisting (`~/.cache/ov`).
 
 ### 🔴 TIER 1 — silent failures that invalidate results
 
@@ -91,16 +159,24 @@ curve is a flat artifact that reads as an exciting finding.
       → If inert: obstacles stay parked at z = −50, the robot drives through
       empty space, and collision rate is implausibly low across every cell.
 
-- [ ] **Obstacle scale matches the sampled radii.** The occupancy grid (and
-      therefore the solvability guarantee) uses per-obstacle sampled radii, but
-      the prim pool spawns one fixed radius. Verify per-instance scale writes.
-      → If wrong: the sim disagrees with the A* check that certified the episode
-      solvable, producing collisions the harness swore were impossible.
+- [x] **The depth sensor sees the obstacles** — *resolved by design.* Isaac
+      Lab's `RayCaster` only handles static meshes and was likely blind to the
+      re-posed kinematic obstacles. The default is now `sensors.modality:
+      analytic_lidar` (`env/lidar.py`): exact ray–circle casting in torch
+      against the episode's `TerrainSpec`, unit-tested locally against a
+      brute-force oracle (`tests/test_lidar.py`). The old RayCaster path is kept
+      as `modality: raycaster` for comparison only.
+      **Its one blind spot:** it reads the *spec*, not the sim. If obstacles
+      fail to move (item above), the lidar still reports them — ghosts. The
+      smoke test now compares every active obstacle prim's pose to the spec and
+      prints `FAIL:` if they differ by > 5 cm.
 
-- [ ] **The raycaster hits the terrain** — `mesh_prim_paths` in `build_env_cfg`
-      must include `/World/envs/env_.*/Ground` **and** the obstacle pool path.
-      → If wrong: depth returns uniformly max-range; the policy is blind but
-      trains anyway, badly, and it looks like a learning problem.
+- [ ] **Obstacle prim radii match their slots** — obstacles are bound to pool
+      slots (`Obstacle.slot`) and slot *k* is spawned with
+      `pool_slot_radii(...)[k]`, so sim, A* and lidar share one radius. (This
+      replaced a latent bug: every prim used to spawn at the *mean* radius
+      while the planner assumed sampled ones.) Verify by printing a few
+      `Obstacle_k` radii from the stage after cloning.
 
 `training/train.py --smoke-test` checks several of these automatically and
 prints explicit `FAIL:` lines. **Run it first.**
@@ -126,6 +202,16 @@ prints explicit `FAIL:` lines. **Run it first.**
       `omni.isaac.orbit_tasks.utils.wrappers.rsl_rl`.
 - [ ] **Inference policy accessor** — `runner.get_inference_policy(device=...)`
       vs `runner.alg.actor_critic.act_inference` (`eval/run_eval.py`).
+
+- [ ] **Resume restores the iteration counter** — `training/train.py` trains
+      `max_iterations - runner.current_learning_iteration`. Confirm the log
+      prints e.g. `Training 1200 iterations (1800/3000 done)` after a resume,
+      not `(0/3000 done)` (which would silently train 3000 more).
+- [ ] **`isaaclab.sh` used the `rtn` python** — its install output names the
+      interpreter; it must be `$RTN_ENV/bin/python`.
+- [ ] **W&B reaches the internet from compute nodes.** If `wandb.init` hangs
+      or errors, rerun with `--set logging.wandb.mode=offline` and
+      `wandb sync results/runs/<run>/wandb/offline-run-*` from the login node.
 
 ### 🟡 TIER 3 — physics correctness
 
@@ -160,6 +246,10 @@ prints explicit `FAIL:` lines. **Run it first.**
 
 ### 🔵 TIER 5 — Nav2 baseline (Phase 3)
 
+**On ARC, use `mode: inproc_planner` only.** ROS 2 is not installed on the
+cluster, and the bridge mode would add a second runtime to debug on nodes you
+cannot see. Everything below the next paragraph applies only off-cluster.
+
 **Recommendation: run `mode: inproc_planner` for the full grid.** It needs no
 ROS 2, batches across all envs, and reuses this repo's own A* — the same planner
 that certified each episode solvable. The ROS 2 path is a spot-check, not the
@@ -184,46 +274,82 @@ For `mode: ros2_bridge` only:
 
 ---
 
-## Part 3 — Phase run order
+## Part 3 — Phase run order (sbatch)
+
+All from the repo root on ARC. `S` is shorthand — put it in your shell, not in
+a file (it carries your email):
 
 ```bash
-# Phase 0 — bring-up. Read every FAIL: line before continuing.
-python training/train.py --config configs/train.yaml --headless --smoke-test
+S="sbatch --account=<ACCT> --mail-user=<you>@vt.edu"
+```
 
-# Phase 1 — flat floor, obstacles, friction, payload, reward v1
-python training/train.py --config configs/train.yaml --headless
+Everything after the `.slurm` name is passed to the Python entrypoint's
+argparse — a typo fails loudly. Do **not** pass settings as `VAR=x sbatch`;
+the launchers read exactly one env var (`RTN_ENV`) and would drop the rest.
 
-# Phase 2 — slope axis + first full OOD sweep
-python training/train.py --config configs/train.yaml --headless \
-    --set phases.enable_slope=true
-python eval/run_eval.py --checkpoint results/runs/<run>/model_final.pt --headless
+```bash
+# ---- Phase 0 — bring-up. Two passes. Read every FAIL: line. -------------------
+# (a) tiny scene: does Isaac Sim start at all on a datacenter GPU (see Tier 0)?
+$S --time=00:45:00 arc/train.slurm --smoke-test --num-envs 64
+# (b) full scene budget: 48 obstacles x 2048 envs (~98k colliders), PhysX buffers
+$S --time=00:45:00 arc/train.slurm --smoke-test
 
-# Phase 3 — Nav2 baseline through the SAME harness
-python eval/run_eval.py --policy nav2 --headless
+# ---- Phase 1 — flat floor, obstacles, friction, payload, reward v1 ------------
+$S arc/train.slurm --run-name p1 --resume auto
+#   short sanity run first if you like:  ... --run-name p1_short --max-iterations 200
 
-# Phase 4 — sensor degradation + transport-aware reward v2
-python training/train.py --config configs/train.yaml --headless \
-    --set phases.enable_sensor_noise=true --set phases.enable_reward_v2=true
+# ---- Sanity floor + Nav2 in-distribution check (can run alongside Phase 1) ----
+$S arc/eval.slurm --policy random --tag random
+$S arc/eval.slurm --policy nav2   --tag nav2
 
-# Phase 5 — inferred payload (told-vs-inferred is exactly this one flag)
-python training/train.py --config configs/train.yaml --headless \
-    --set phases.enable_inferred_payload=true
+# ---- Phase 2 — slope axis, 3 seeds in parallel, then the OOD sweep ------------
+$S --array=0-2 arc/train.slurm --run-name p2_slope --resume auto --seed-from-array \
+     --set phases.enable_slope=true
+#   -> results/runs/p2_slope_s42, _s43, _s44
+$S arc/eval.slurm --checkpoint results/runs/p2_slope_s42/model_final.pt --tag p2_s42
+#   (repeat per seed; if a run hit walltime, use its highest model_<N>.pt)
 
-# Phase 6 — figures (runs locally, no GPU)
+# ---- Phase 4 — sensor degradation + transport-aware reward v2 -----------------
+$S --array=0-2 arc/train.slurm --run-name p4 --resume auto --seed-from-array \
+     --set phases.enable_slope=true --set phases.enable_sensor_noise=true \
+     --set phases.enable_reward_v2=true
+
+# ---- Phase 5 — inferred payload (told-vs-inferred is this one flag) -----------
+$S --array=0-2 arc/train.slurm --run-name p5_inferred --resume auto --seed-from-array \
+     --set phases.enable_slope=true --set phases.enable_inferred_payload=true
+
+# ---- Phase 6 — figures: on the Mac, from copied-back CSVs (no GPU) ------------
 python analysis/plots.py --results-dir results/eval --out-dir results/figures
 ```
 
-**Sanity floor, worth one run:** `python eval/run_eval.py --policy random` tells
-you what success rate the *task* yields with no competence at all. If the
-trained policy sits near that floor the problem is training, not generalization;
-if the random policy scores well, the task is too easy for the OOD study to say
-anything.
+**Walltime kill ≠ lost run.** Resubmit the *identical* line: `--resume auto`
+finds the highest `model_<N>.pt` in that run's directory, trains only the
+remaining iterations, and appends to the same W&B run.
+
+**Monitoring:**
+
+```bash
+squeue -u $USER -o "%.10i %.14j %.9T %.11M %.11L %.22R %N"
+tail -f logs/slurm/rtn-train-<jobid>.out
+srun --jobid=<id> --overlap nvidia-smi          # is it actually computing?
+sacct -j <id> --format=JobID,State,Elapsed,MaxRSS,ExitCode
+```
+
+**A job that "completes" in seconds with exit 0 is not a success.** Check the
+`[arc_env] python=...` line; `arc_env.sh` aborts loudly on a broken
+interpreter, but confirm it printed at all.
+
+**Budget (estimates, not measurements):** ~147M env steps per training run →
+1.5–4 GPU-h each; ~10 training jobs (P1 + 3 seeds × P2/P4/P5) + ~6 eval sweeps
+≈ **25–45 GPU-hours** (L40S physics throughput is comparable to A100 for this workload), plus bring-up. Measure the real steps/s from the Phase 1
+log and re-size `--time` from that.
 
 ---
 
 ## Part 4 — What to bring back
 
-Copy back and the whole analysis reruns locally with no GPU:
+`results/` is gitignored, so copy it back with `rsync`/`scp` (or the ARC
+OnDemand file browser). The whole analysis then reruns on the Mac with no GPU:
 
 ```
 results/eval/episodes_*.csv     # per-episode records — any metric recomputable
@@ -233,7 +359,7 @@ results/runs/*/resolved_config.json   # exact config that produced the run
 ```
 
 Bring back **failures too** — a stack trace, a flat curve, an implausible
-success rate. The `# VERIFY ON A100:` list above is where to look first, and a
+success rate. The `# VERIFY ON A100:` / `# VERIFY ON ARC:` list above is where to look first, and a
 flat curve is far more often an inert axis (Tier 1) than a real finding.
 
 ---

@@ -1,6 +1,6 @@
 """Training entrypoint: config -> env -> PPO -> W&B -> checkpoints.
 
-Run on the A100:
+Run on VT ARC via ``arc/train.slurm`` (see setup_notes.md), which invokes:
 
     python training/train.py --config configs/train.yaml --headless
 
@@ -42,8 +42,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None, help="Override config seed")
     parser.add_argument("--num-envs", type=int, default=None, help="Override env.num_envs")
     parser.add_argument("--max-iterations", type=int, default=None, help="Override max_iterations")
-    parser.add_argument("--resume", type=str, default=None, help="Checkpoint path, or 'latest'")
-    parser.add_argument("--run-name", type=str, default=None, help="W&B run name")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Checkpoint path, 'latest' (must exist), or 'auto' (resume if this run "
+        "has a checkpoint, else start fresh -- use with a fixed --run-name on SLURM)",
+    )
+    parser.add_argument("--run-name", type=str, default=None, help="Run dir + W&B run name")
+    parser.add_argument(
+        "--seed-from-array",
+        action="store_true",
+        help="Under a SLURM job array: seed = config seed + SLURM_ARRAY_TASK_ID, and "
+        "'_s<seed>' is appended to --run-name. One submit -> N seeds in parallel.",
+    )
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument(
         "--set",
@@ -155,6 +167,17 @@ def main() -> None:
         data["experiment"]["run_name"] = args.run_name
     if args.no_wandb:
         data["logging"]["wandb"]["enabled"] = False
+    if args.seed_from_array:
+        task_id = os.environ.get("SLURM_ARRAY_TASK_ID")
+        if task_id is None:
+            raise SystemExit("--seed-from-array given but SLURM_ARRAY_TASK_ID is unset (not an array job)")
+        data["seed"] = int(data["seed"]) + int(task_id)
+        base = data["experiment"]["run_name"] or "run"
+        data["experiment"]["run_name"] = f"{base}_s{data['seed']}"
+    if args.resume == "auto" and not data["experiment"]["run_name"]:
+        # Without a fixed name every submission gets a fresh timestamped dir, so
+        # 'auto' could never find the previous attempt's checkpoints.
+        raise SystemExit("--resume auto requires --run-name (a stable run directory)")
 
     # Re-validate AFTER overrides -- an override is exactly how an invalid
     # config sneaks in, so the assertions must see the final values.
@@ -187,14 +210,23 @@ def main() -> None:
     wrapped_env = wrap_env_for_library(env, cfg)
     runner = build_runner(wrapped_env, cfg, log_dir=log_dir, device=str(env.device))
 
-    if args.resume:
-        checkpoint = resolve_checkpoint_path(data["logging"]["log_dir"], args.resume)
+    # 'latest'/'auto' search THIS run's directory only -- never another run's.
+    checkpoint = resolve_checkpoint_path(log_dir, args.resume)
+    if checkpoint:
         print(f"Resuming from {checkpoint}")
         runner.load(checkpoint)
+    elif args.resume == "auto":
+        print("No checkpoint in this run dir -- starting fresh.")
 
+    # rsl_rl's learn() runs N iterations MORE than the loaded one, so a resumed
+    # job must ask only for what is left, not the full budget again.
+    # VERIFY ON ARC: OnPolicyRunner.load restores `current_learning_iteration`.
     max_iterations = int(data["algo"][data["algo"]["name"]]["max_iterations"])
-    print(f"\n=== Training for {max_iterations} iterations ===")
-    runner.learn(num_learning_iterations=max_iterations, init_at_random_ep_len=True)
+    done = int(getattr(runner, "current_learning_iteration", 0))
+    remaining = max(0, max_iterations - done)
+    print(f"\n=== Training {remaining} iterations ({done}/{max_iterations} done) ===")
+    if remaining > 0:
+        runner.learn(num_learning_iterations=remaining, init_at_random_ep_len=True)
 
     final_path = os.path.join(log_dir, "model_final.pt")
     runner.save(final_path)
@@ -235,6 +267,10 @@ def setup_logging(cfg: Any, data: Dict[str, Any]) -> str:
                 project=wandb_cfg["project"],
                 entity=wandb_cfg["entity"],
                 name=run_name,
+                # Stable id: a walltime-resumed SLURM job appends to the same
+                # W&B run instead of starting a disconnected one.
+                id=run_name,
+                resume="allow",
                 mode=wandb_cfg["mode"],
                 config=data,
                 notes=experiment.get("notes", ""),
@@ -296,6 +332,30 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     print(f"  friction spread   : {env.friction.min().item():.2f} - {env.friction.max().item():.2f}")
     print(f"  slope spread      : {env.slope_deg.min().item():.2f} - {env.slope_deg.max().item():.2f} deg")
 
+    # Sim-vs-spec obstacle agreement. The analytic lidar reads the SPEC, so if
+    # the sim silently failed to move obstacles the lidar would still "see"
+    # them -- the policy would learn to dodge ghosts while driving through
+    # empty space. Compare every active prim's actual pose with the spec.
+    # Skip envs reset on the last step: their prim poses were written this step
+    # and may not be reflected in `.data` until the next physics update.
+    settled = env.episode_length_buf > 1
+    pose_err = 0.0
+    for slot, obstacle in enumerate(env.obstacles):
+        valid = env.obstacle_valid[:, slot] & settled
+        if not bool(valid.any()):
+            continue
+        sim_xy = obstacle.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+        err = torch.norm(sim_xy - env.obstacle_xyr[:, slot, :2], dim=-1)[valid]
+        pose_err = max(pose_err, float(err.max().item()))
+    print(f"  obstacle pose err : {pose_err:.3f} m (max |sim - spec| over active obstacles)")
+
+    hit_frac = None
+    if env.obs_spec.has("depth"):
+        final_depth = obs["policy"] if isinstance(obs, dict) else obs
+        final_depth = final_depth[:, env.obs_spec.slice_of("depth")]
+        hit_frac = float((final_depth < 0.999).float().mean().item())
+        print(f"  rays hitting      : {100.0 * hit_frac:.1f}% (normalized range < max)")
+
     print("\n--- INTERPRET ---")
     if displacement.mean().item() < 0.01:
         print("  FAIL: robot did not move. Check wheel joint names and the actuator")
@@ -303,6 +363,13 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     if depth_samples and abs(sum(depth_samples) / len(depth_samples) - 1.0) < 1e-3:
         print("  FAIL: depth is saturated at max range -- the raycaster is hitting")
         print("        nothing. Check RayCasterCfg.mesh_prim_paths in build_env_cfg.")
+    if pose_err > 0.05:
+        print("  FAIL: sim obstacle poses disagree with the spec -- write_root_pose_to_sim")
+        print("        is not moving the kinematic obstacles (_apply_terrain_to_sim). The")
+        print("        analytic lidar would report ghosts. Tier 1, setup_notes.md.")
+    if hit_frac is not None and hit_frac < 0.01:
+        print("  FAIL: almost no ray hits anything. With obstacles present this means")
+        print("        the sensor is blind (check sensors.modality and obstacle_valid).")
     if float(env.friction.max() - env.friction.min()) < 1e-6:
         print("  FAIL: friction is identical across envs. The friction axis is INERT;")
         print("        its OOD curve would be a flat artifact. See _apply_friction.")

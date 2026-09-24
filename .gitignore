@@ -28,3 +28,11 @@ venv/
 
 # Machine-local Claude Code settings
 .claude/settings.local.json
+
+# SLURM logs (directory tracked: sbatch cannot create it and fails without it)
+logs/slurm/*
+!logs/slurm/.gitkeep
+
+# VT ARC notes from the VLM project (personal email, paths) -- keep out of this public repo
+arc_runbook.md
+arc_quickref.md

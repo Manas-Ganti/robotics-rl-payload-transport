@@ -31,6 +31,14 @@ to **out-of-distribution (OOD) terrain, friction, and payload** — benchmarked 
 - **Do not execute, pip install, or launch simulators locally.** Write code and configs
   only. Static review is fine; running is not.
 
+**Runtime = VT ARC (SLURM), not a standalone A100 box.** Jobs run on 1 × L40S
+(RT cores -> supported Isaac Sim GPU; A100/H200 = headless-only fallback) via `arc/train.slurm` / `arc/eval.slurm`;
+install is pip Isaac Sim 4.5 + Isaac Lab v2.1 in a dedicated conda env
+(`arc/setup_env.sh`) -- no Docker on ARC. Seeds = SLURM job arrays. Everything
+the user passes goes through argparse (`--set ...`), never `VAR=x sbatch`.
+`# VERIFY ON A100:` notes still apply; new cluster-specific ones say `VERIFY ON ARC:`.
+See `setup_notes.md` Parts 0-3.
+
 **Deliverable of the local session:** a complete, transfer-ready repo the user can `scp`
 to the A100, `pip install`, and run phase by phase.
 

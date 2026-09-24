@@ -52,7 +52,7 @@ shift rather than a confounded mixture.
 
 - **Robot:** differential-drive mobile base (Isaac Lab built-in; isolated in `configs/robot.yaml`)
 - **Mission:** carry a sampled-mass payload from start to goal without collision
-- **Observation:** 64-ray depth + goal-relative pose `(cos, sin, dist)` + proprioception + payload mass *(the last is toggleable off — that flag is the Phase 5 told-vs-inferred experiment)*
+- **Observation:** 64-ray analytic 2D lidar (exact ray–circle casting against the episode's obstacles, `env/lidar.py`) + goal-relative pose `(cos, sin, dist)` + proprioception + payload mass *(the last is toggleable off — that flag is the Phase 5 told-vs-inferred experiment)*
 - **Action:** continuous `(linear velocity, angular velocity)`
 - **Termination:** goal reached (success) | collision (fail) | timeout (fail)
 
@@ -70,24 +70,28 @@ pytest tests/ -v          # reward, solvability, and config tests
 The pure-logic core — reward, solvability, terrain generation, spaces, config —
 imports without a simulator. Only `env/nav_env.py` requires Isaac.
 
-### On the A100
+### On VT ARC (SLURM, 1 × L40S per job)
 
 ```bash
+bash arc/setup_env.sh                                   # once, login node
+S="sbatch --account=<ACCT> --mail-user=<you>@vt.edu"
+
 # 0. Bring-up. Read every FAIL: line before continuing.
-python training/train.py --config configs/train.yaml --headless --smoke-test
+$S --time=00:45:00 arc/train.slurm --smoke-test --num-envs 64
 
-# 1. Train
-python training/train.py --config configs/train.yaml --headless
+# 1. Train (resubmit the identical line after a walltime kill)
+$S arc/train.slurm --run-name p1 --resume auto
 
-# 2. Sweep the OOD grid
-python eval/run_eval.py --checkpoint results/runs/<run>/model_final.pt --headless
-
-# 3. Baseline, same harness
-python eval/run_eval.py --policy nav2 --headless
+# 2. Sweep the OOD grid; 3. baseline through the same harness
+$S arc/eval.slurm --checkpoint results/runs/p1/model_final.pt --tag p1
+$S arc/eval.slurm --policy nav2 --tag nav2
 
 # 4. Figures (back on the laptop, from CSVs)
 python analysis/plots.py --results-dir results/eval --out-dir results/figures
 ```
+
+Seeds run as job arrays (`--array=0-2 ... --seed-from-array`), not multi-GPU.
+The full phase-by-phase sequence is in `setup_notes.md` Part 3.
 
 **Read [`setup_notes.md`](setup_notes.md) before the first long run.** It is the
 collected `# VERIFY ON A100:` checklist, ordered by how badly a silent failure
@@ -97,7 +101,7 @@ corrupts the study.
 
 ## Config-driven iteration
 
-The A100 loop is *run → inspect → tweak → rerun*, so tweaking must not require
+The cluster loop is *run → inspect → tweak → rerun*, so tweaking must not require
 code edits. Every phase is a flag:
 
 ```bash
@@ -120,13 +124,14 @@ and logged to W&B.
 
 ```
 configs/       train.yaml (inner ranges, PPO, reward) | eval_ood.yaml (held-out grid) | robot.yaml
-env/           terrain_factory · payload · solvability · randomization · spaces · reward   [PURE]
+env/           terrain_factory · payload · solvability · randomization · spaces · reward · lidar   [PURE]
                nav_env.py                                                        [ISAAC-ONLY]
 training/      train.py (entrypoint, W&B, checkpoints) · ppo_config.py (library seam)
+arc/           setup_env.sh (one-time install) · train.slurm · eval.slurm · arc_env.sh
 baselines/     nav2_runner.py — implements the same Policy interface
 eval/          ood_harness.py (shared sweep) · metrics.py (pure) · run_eval.py
 analysis/      plots.py — every figure from CSVs, no GPU
-tests/         reward · solvability · config — all pass WITHOUT Isaac
+tests/         reward · solvability · config · lidar — all pass WITHOUT Isaac
 ```
 
 The split is deliberate: everything except `nav_env.py` is pure enough to unit
@@ -137,7 +142,7 @@ solvability guarantee, the reward signs) *testable* rather than merely asserted.
 
 ## Results
 
-*(Populated from the A100. Regenerate with `python analysis/plots.py`, which
+*(Populated from ARC runs. Regenerate with `python analysis/plots.py`, which
 writes `results/figures/results_table.md`.)*
 
 **Classification (mechanical, `eval/metrics.py::classify_degradation`):**

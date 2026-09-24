@@ -1,27 +1,28 @@
 # =============================================================================
 # requirements.txt
 # =============================================================================
-# NOT INCLUDED HERE (install separately -- see setup_notes.md):
-#   * Isaac Sim      -- installed via Omniverse or the NGC container
-#   * Isaac Lab      -- installed from source against a matching Isaac Sim
-#   * torch          -- ships WITH Isaac Sim's bundled Python; installing a
-#                       second torch into that interpreter reliably breaks it
-#   * ROS 2 / Nav2   -- apt packages, only needed for nav2 ros2_bridge mode
+# NOT INCLUDED HERE -- arc/setup_env.sh installs them, in this order:
+#   * torch 2.5.1/cu121 -- pinned to what Isaac Sim 4.5 expects, BEFORE isaacsim.
+#                          Never let a later install upgrade it.
+#   * isaacsim 4.5.0    -- pip, into the dedicated `rtn` conda env
+#   * Isaac Lab v2.1.0  -- source checkout, `isaaclab.sh --install rsl_rl`
+#   * ROS 2 / Nav2      -- only for nav2 ros2_bridge mode (not used on ARC)
 #
-# Install into ISAAC SIM'S python, not the system python:
-#   ${ISAACSIM_PATH}/python.sh -m pip install -r requirements.txt
+# On ARC this file is installed by arc/setup_env.sh into $RTN_ENV. Locally
+# (pure-logic tests only): pip install numpy pyyaml pytest matplotlib
 # =============================================================================
 
 # ---- core (needed everywhere, including the local GPU-less machine) ----
-numpy>=1.24,<2.0          # <2.0: Isaac Sim 4.x bundles a NumPy 1.x build
+numpy>=1.24,<2.0          # <2.0: Isaac Sim 4.x requires NumPy 1.x
 pyyaml>=6.0
 
 # ---- experiment tracking ----
 wandb>=0.16.0
 
 # ---- RL (A100 only; rsl_rl expects torch to already be present) ----
-rsl-rl-lib>=2.0.2         # VERIFY ON A100: Isaac Lab pins a specific version.
-                          # Check isaaclab's own setup.py before overriding.
+rsl-rl-lib>=2.0.2         # Already installed by `isaaclab.sh --install rsl_rl`
+                          # at Isaac Lab's pinned version; this floor must not
+                          # force an upgrade past it. VERIFY ON ARC: pip list.
 
 # ---- analysis / plotting (runs locally on results CSVs) ----
 matplotlib>=3.7.0

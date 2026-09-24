@@ -35,12 +35,43 @@ from env.solvability import (
 
 @dataclass(frozen=True)
 class Obstacle:
-    """One cylindrical obstacle, in world metres relative to the env origin."""
+    """One cylindrical obstacle, in world metres relative to the env origin.
+
+    ``slot`` is the index of the simulator prim (``Obstacle_<slot>``) that
+    realises this obstacle. Its radius is that slot's FIXED spawned radius (see
+    :func:`pool_slot_radii`), so the sim, the occupancy grid / A* check, and the
+    analytic lidar all agree on the obstacle's size. -1 = not bound to a slot
+    (hand-built test fixtures only).
+    """
 
     x: float
     y: float
     radius: float
     height: float
+    slot: int = -1
+
+
+def pool_slot_radii(radius_range_m: Tuple[float, float], num_slots: int) -> np.ndarray:
+    """The fixed radius of each obstacle-pool prim: evenly spaced over the range.
+
+    Why fixed per slot: Isaac Lab clones one prim graph across envs and PhysX
+    cannot rescale a collision shape per env at runtime, so a prim's radius is
+    set once at spawn. Rather than pretend otherwise (spawning one mean radius
+    while the planner assumed sampled ones), terrain generation draws obstacles
+    FROM the slots. Picking slots uniformly at random then gives radii uniform
+    over this grid -- a discretised uniform over the configured range.
+
+    ``env/nav_env.py`` spawns slot ``k`` with ``pool_slot_radii(...)[k]``; both
+    sides call this one function, so they cannot disagree.
+    """
+    lo, hi = float(radius_range_m[0]), float(radius_range_m[1])
+    if num_slots < 1:
+        raise ValueError(f"num_slots must be >= 1, got {num_slots}")
+    if not 0.0 < lo <= hi:
+        raise ValueError(f"obstacle_radius_range_m must satisfy 0 < lo <= hi, got {radius_range_m}")
+    if num_slots == 1:
+        return np.array([(lo + hi) / 2.0])
+    return np.linspace(lo, hi, num_slots)
 
 
 @dataclass
@@ -140,6 +171,9 @@ class TerrainFactory:
         # has no prim to spawn -- a mismatch would break the solvability
         # guarantee in the one direction that matters (sim easier than planned).
         self.max_obstacles_per_env: int = int(terrain_cfg["max_obstacles_per_env"])
+        self.slot_radii: np.ndarray = pool_slot_radii(
+            self.obstacle_radius_range, self.max_obstacles_per_env
+        )
 
         self.robot_radius_m: float = float(solv_cfg["robot_radius_m"])
         self.connectivity: int = int(solv_cfg["connectivity"])
@@ -250,20 +284,19 @@ class TerrainFactory:
 
         obstacles: List[Obstacle] = []
         placed_area = 0.0
-        r_lo, r_hi = self.obstacle_radius_range
 
-        # Bounded loop: area-based termination, plus the simulator's pool cap, so
-        # a pathological radius/area combination can neither spin forever nor
-        # request more obstacles than nav_env.py can spawn.
-        area_bound = int(target_area / (math.pi * r_lo**2) * 2) + 1
-        max_obstacles = min(area_bound, self.max_obstacles_per_env)
-        for _ in range(max_obstacles):
+        # Draw pool slots in random order; each obstacle takes its slot's fixed
+        # radius (see pool_slot_radii). Bounded by the pool size, so generation
+        # can neither spin forever nor request a prim nav_env.py does not have.
+        for slot in rng.permutation(self.max_obstacles_per_env):
             if placed_area >= target_area:
                 break
-            radius = float(rng.uniform(r_lo, r_hi))
+            radius = float(self.slot_radii[slot])
             x = float(rng.uniform(-usable_half, usable_half))
             y = float(rng.uniform(-usable_half, usable_half))
-            obstacles.append(Obstacle(x=x, y=y, radius=radius, height=self.obstacle_height_m))
+            obstacles.append(
+                Obstacle(x=x, y=y, radius=radius, height=self.obstacle_height_m, slot=int(slot))
+            )
             placed_area += math.pi * radius**2
 
         if len(obstacles) >= self.max_obstacles_per_env and placed_area < target_area * 0.95:

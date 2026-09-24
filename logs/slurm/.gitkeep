@@ -1,0 +1,1 @@
+# SLURM logs land here. sbatch fails immediately if this directory is missing.

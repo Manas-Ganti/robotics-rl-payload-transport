@@ -170,15 +170,29 @@ def wrap_env_for_library(env: Any, cfg: Any) -> Any:
 
 
 def resolve_checkpoint_path(log_dir: str, checkpoint: Optional[str]) -> Optional[str]:
-    """Resolve a checkpoint path, accepting 'latest' as a convenience alias."""
+    """Resolve a checkpoint path.
+
+    ``'latest'`` -> highest-iteration ``model_<N>.pt`` under ``log_dir`` (raises if none).
+    ``'auto'``   -> same, but returns None when there is nothing to resume, so a
+                    SLURM job killed at walltime continues when the IDENTICAL
+                    submit line is resubmitted, and a first run starts fresh.
+
+    Iterations are compared numerically: a lexicographic sort ranks
+    ``model_900.pt`` above ``model_1000.pt`` and silently resumes from the past.
+    ``model_final.pt`` is excluded -- a finished run has nothing to resume.
+    """
     from pathlib import Path
 
     if checkpoint is None:
         return None
-    if checkpoint != "latest":
+    if checkpoint not in ("latest", "auto"):
         return checkpoint
 
-    candidates = sorted(Path(log_dir).glob("**/model_*.pt"))
+    candidates = [
+        p for p in Path(log_dir).glob("**/model_*.pt") if p.stem.rsplit("_", 1)[-1].isdigit()
+    ]
     if not candidates:
-        raise FileNotFoundError(f"No checkpoints matching 'model_*.pt' under {log_dir}")
-    return str(candidates[-1])
+        if checkpoint == "auto":
+            return None
+        raise FileNotFoundError(f"No checkpoints matching 'model_<N>.pt' under {log_dir}")
+    return str(max(candidates, key=lambda p: int(p.stem.rsplit("_", 1)[-1])))

@@ -231,6 +231,7 @@ logging:
     entity: null               # null -> W&B default entity
     mode: "online"             # "online" | "offline" | "disabled"
   log_dir: "results/runs"
-  video: false                 # VERIFY ON A100: headless video capture needs a render camera
+  video: false                 # NOT WIRED: no code reads the video.* keys yet. Rendering is possible on
+                               # L40S (RT cores); needs --enable_cameras + a gym RecordVideo wrapper in train.py.
   video_interval_iters: 500
   video_length_steps: 300

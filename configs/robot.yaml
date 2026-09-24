@@ -60,12 +60,24 @@ payload:
 # ---------------------------------------------------------------------------
 sensors:
   # Primary exteroceptive sensor. depth-only is fine for v1 (CLAUDE.md).
-  # "raycaster" is strongly preferred on A100: it is GPU-parallel across all
-  # envs and far cheaper than tiled cameras at num_envs=2048.
-  modality: "raycaster"        # "raycaster" (2D lidar-like) | "camera" (depth)
+  #   "analytic_lidar" (DEFAULT): exact ray-circle casting against the episode's
+  #       TerrainSpec in torch (env/lidar.py). Sees the per-episode kinematic
+  #       obstacles, which Isaac Lab's RayCaster (static meshes only) likely
+  #       cannot. No sensor prim, no rendering, locally unit-tested.
+  #   "raycaster": Isaac Lab RayCaster. Kept for comparison; likely blind to
+  #       obstacles (setup_notes.md Tier 1).
+  #   "camera": not wired. Viable on L40S (RT cores) via TiledCameraCfg.
+  modality: "analytic_lidar"   # "analytic_lidar" | "raycaster" | "camera"
+
+  analytic_lidar:
+    # The patch edge is a drop-off; Nav2's costmap is bounded to the same patch,
+    # so exposing it as a wall keeps the head-to-head even.
+    boundary_as_obstacle: true
 
   raycaster:
-    # VERIFY ON A100: isaaclab.sensors.RayCasterCfg + patterns.LidarPatternCfg
+    # Ray GEOMETRY below is shared by "raycaster" and "analytic_lidar", so the
+    # observation layout is identical whichever modality is chosen.
+    # VERIFY ON A100 (raycaster modality only): isaaclab.sensors.RayCasterCfg + patterns.LidarPatternCfg
     num_rays: 64
     horizontal_fov_deg: 180.0  # forward-facing half-plane
     max_range_m: 8.0

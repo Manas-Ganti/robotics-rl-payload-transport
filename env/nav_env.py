@@ -40,12 +40,14 @@ from env.payload import PayloadSpec, apply_mass_modifier, set_payload_mass_batch
 from env.randomization import DomainSampler, EpisodeParams, resolve_physics_material
 from env.reward import RewardConfig, RewardState, compute_reward
 from env.spaces import ActionSpec, ObservationSpec, build_observation_spec
-from env.terrain_factory import TerrainFactory, TerrainSpec
+from env.lidar import LidarSpec, cast_rays, obstacles_to_arrays
+from env.terrain_factory import TerrainFactory, TerrainSpec, pool_slot_radii
 
 # ---------------------------------------------------------------------------
 # Isaac Lab imports.
 # VERIFY ON A100: module paths changed across Isaac Gym -> Orbit -> Isaac Lab.
-#   Isaac Lab 1.x : isaaclab.*
+#   Isaac Lab 2.x : isaaclab.*            (pinned: v2.1.0, see arc/setup_env.sh)
+#   Isaac Lab 1.x : omni.isaac.lab.*
 #   Orbit (older) : omni.isaac.orbit.*
 # ---------------------------------------------------------------------------
 import isaaclab.sim as sim_utils  # noqa: E402
@@ -200,7 +202,13 @@ def build_env_cfg(cfg: Config) -> TransportNavEnvCfg:
     )
 
     # -- exteroceptive sensor ---------------------------------------------
-    if sensors_cfg["modality"] == "raycaster":
+    if sensors_cfg["modality"] == "analytic_lidar":
+        # No sensor prim: ranges are computed in torch from the episode's
+        # TerrainSpec (env/lidar.py). Validate the geometry block up front so a
+        # bad config fails here, not on the first observation.
+        LidarSpec.from_config(cfg)
+        out.ray_caster = None
+    elif sensors_cfg["modality"] == "raycaster":
         rc = sensors_cfg["raycaster"]
         # VERIFY ON A100: LidarPatternCfg field names (`horizontal_fov_range` vs
         # `horizontal_fov`) differ across versions, and `mesh_prim_paths` must
@@ -297,8 +305,12 @@ class TransportNavEnv(DirectRLEnv):
         self.contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self.contact_sensor
 
-        self.ray_caster = RayCaster(self.cfg.ray_caster)
-        self.scene.sensors["ray_caster"] = self.ray_caster
+        # Only the legacy "raycaster" modality has a sensor prim; the default
+        # analytic lidar is pure tensor math over the TerrainSpec.
+        self.ray_caster = None
+        if self.cfg.ray_caster is not None:
+            self.ray_caster = RayCaster(self.cfg.ray_caster)
+            self.scene.sensors["ray_caster"] = self.ray_caster
 
         self._spawn_ground()
         self._spawn_obstacle_pool()
@@ -355,7 +367,12 @@ class TransportNavEnv(DirectRLEnv):
         layouts.
         """
         self.max_obstacles = int(self._raw["terrain"]["max_obstacles_per_env"])
-        radius = float(np.mean(self._raw["terrain"]["obstacle_radius_range_m"]))
+        # Slot k is spawned with the SAME radius TerrainFactory assigns to any
+        # obstacle it binds to slot k -- one shared function, so sim geometry,
+        # the A* occupancy grid, and the analytic lidar cannot disagree.
+        slot_radii = pool_slot_radii(
+            tuple(self._raw["terrain"]["obstacle_radius_range_m"]), self.max_obstacles
+        )
         height = float(self._raw["terrain"]["obstacle_height_m"])
 
         self.obstacles: List[RigidObject] = []
@@ -363,7 +380,7 @@ class TransportNavEnv(DirectRLEnv):
             obstacle_cfg = RigidObjectCfg(
                 prim_path=f"/World/envs/env_.*/Obstacles/Obstacle_{i}",
                 spawn=sim_utils.CylinderCfg(
-                    radius=radius,
+                    radius=float(slot_radii[i]),
                     height=height,
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                     collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
@@ -375,14 +392,12 @@ class TransportNavEnv(DirectRLEnv):
             self.scene.rigid_objects[f"obstacle_{i}"] = obstacle
             self.obstacles.append(obstacle)
 
-        # NOTE: obstacle RADIUS is fixed across the pool while TerrainFactory
-        # samples per-obstacle radii. The occupancy grid (and therefore the
-        # solvability guarantee) uses the SAMPLED radii, so a sampled radius
-        # larger than the spawned one would make the sim easier than the planner
-        # believes -- and a smaller one would make it harder, producing
-        # collisions the A* check ruled out. _apply_terrain_to_sim rescales each
-        # instance to its sampled radius to keep the two in agreement.
-        # VERIFY ON A100: per-instance scale writes on a cloned prim.
+        # NOTE: radii are fixed PER SLOT at spawn (no runtime rescaling -- PhysX
+        # cannot rescale a cloned collision shape per env). TerrainFactory draws
+        # obstacles from these slots (Obstacle.slot), which is what keeps the sim
+        # consistent with the solvability guarantee.
+        # VERIFY ON ARC: each env_.*/Obstacles/Obstacle_k prim has radius
+        # slot_radii[k] (print a few from the stage after cloning).
 
     def _spawn_payload(self) -> None:
         """Spawn the payload according to ``payload.attach_mode``."""
@@ -436,6 +451,17 @@ class TransportNavEnv(DirectRLEnv):
         self.goal_tolerance = float(self._raw["env"]["goal_tolerance_m"])
         self.collision_threshold = float(self._raw["env"]["collision_force_threshold"])
         self.max_range_m = float(self._raw["sensors"]["raycaster"]["max_range_m"])
+
+        # Analytic lidar state: per-env obstacle table indexed by pool slot, so
+        # row k describes exactly the sim prim Obstacle_k.
+        self.sensor_modality = str(self._raw["sensors"]["modality"])
+        self.obstacle_xyr = torch.zeros(n, self.max_obstacles, 3, device=device)
+        self.obstacle_valid = torch.zeros(n, self.max_obstacles, dtype=torch.bool, device=device)
+        if self.sensor_modality == "analytic_lidar":
+            self.lidar_spec = LidarSpec.from_config(self._cfg_obj)
+            self.lidar_angles = torch.tensor(
+                self.lidar_spec.ray_angles(), dtype=torch.float32, device=device
+            )
 
         # Per-env CPU-side terrain specs (NumPy layouts + ground-truth path lengths).
         self._terrain_specs: List[Optional[TerrainSpec]] = [None] * n
@@ -537,7 +563,37 @@ class TransportNavEnv(DirectRLEnv):
         return {"policy": obs}
 
     def _get_depth_obs(self) -> torch.Tensor:
-        """Ray distances, with Phase 4 sensor degradation applied.
+        """Ray distances, with Phase 4 sensor degradation applied."""
+        if self.sensor_modality == "analytic_lidar":
+            distances = self._analytic_lidar_ranges()
+        else:
+            distances = self._raycaster_ranges()
+
+        distances = self._apply_depth_degradation_torch(distances)
+
+        return distances / self.max_range_m if self.obs_spec.normalize else distances
+
+    def _analytic_lidar_ranges(self) -> torch.Tensor:
+        """Exact ranges from the TerrainSpec (env/lidar.py -- the unit-tested code).
+
+        Env-local frame, same as the spec: robot xy minus the env origin. The
+        lidar is mounted at the chassis origin and turns with the robot's yaw.
+        """
+        robot_xy = self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        return cast_rays(
+            torch,
+            robot_xy,
+            self._robot_yaw(),
+            self.lidar_angles,
+            self.obstacle_xyr,
+            self.obstacle_valid,
+            max_range_m=self.lidar_spec.max_range_m,
+            half_size_m=self.lidar_spec.half_size_m,
+            boundary_as_obstacle=self.lidar_spec.boundary_as_obstacle,
+        )
+
+    def _raycaster_ranges(self) -> torch.Tensor:
+        """Legacy Isaac Lab RayCaster ranges (``sensors.modality: raycaster``).
 
         VERIFY ON A100: ``ray_caster.data.ray_hits_w`` gives world-space HIT
         POINTS, not distances -- the norm below converts them. Rays that hit
@@ -548,11 +604,7 @@ class TransportNavEnv(DirectRLEnv):
         origins = self.ray_caster.data.pos_w.unsqueeze(1)
         distances = torch.norm(hits - origins, dim=-1)
         distances = torch.nan_to_num(distances, nan=self.max_range_m, posinf=self.max_range_m)
-        distances = torch.clamp(distances, 0.0, self.max_range_m)
-
-        distances = self._apply_depth_degradation_torch(distances)
-
-        return distances / self.max_range_m if self.obs_spec.normalize else distances
+        return torch.clamp(distances, 0.0, self.max_range_m)
 
     def _apply_depth_degradation_torch(self, distances: torch.Tensor) -> torch.Tensor:
         """GPU mirror of ``randomization.apply_depth_degradation``.
@@ -748,6 +800,10 @@ class TransportNavEnv(DirectRLEnv):
             [s.start_xy for s in specs], dtype=torch.float32, device=device
         )
 
+        xyr, valid = obstacles_to_arrays([s.obstacles for s in specs], self.max_obstacles)
+        self.obstacle_xyr[idx] = torch.as_tensor(xyr, device=device)
+        self.obstacle_valid[idx] = torch.as_tensor(valid, device=device)
+
     def _apply_terrain_to_sim(self, env_ids: List[int], specs: List[TerrainSpec]) -> None:
         """Push obstacle poses, ground slope, and friction into the simulator.
 
@@ -761,18 +817,21 @@ class TransportNavEnv(DirectRLEnv):
              changes, the friction OOD axis is inert -- and the resulting flat
              robustness curve looks like an exciting "policy is friction-robust"
              finding rather than the bug it is. Check this one first.
-          3. Per-instance obstacle SCALE, so spawned radii match the sampled
-             radii the occupancy grid (and the solvability guarantee) assumed.
+          3. Slot binding: prim Obstacle_k receives the spec obstacle with
+             ``slot == k`` (its radius was fixed to match at spawn).
         """
         device = self.device
+        # Obstacles are bound to pool slots by TerrainFactory (Obstacle.slot);
+        # each prim must receive the obstacle whose radius it was spawned with.
+        slot_maps = [{o.slot: o for o in spec.obstacles} for spec in specs]
 
         for slot, obstacle in enumerate(self.obstacles):
             poses: List[List[float]] = []
             active_ids: List[int] = []
-            for env_id, spec in zip(env_ids, specs):
+            for env_id, spec, by_slot in zip(env_ids, specs, slot_maps):
                 origin = self.scene.env_origins[env_id]
-                if slot < len(spec.obstacles):
-                    obs = spec.obstacles[slot]
+                obs = by_slot.get(slot)
+                if obs is not None:
                     poses.append(
                         [
                             float(origin[0]) + obs.x,

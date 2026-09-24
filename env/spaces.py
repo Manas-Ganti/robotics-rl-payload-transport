@@ -101,7 +101,9 @@ def build_observation_spec(cfg: Any) -> ObservationSpec:
 
     # Sensor dimensionality depends on the chosen modality.
     modality = sensors.get("modality", "raycaster")
-    if modality == "raycaster":
+    if modality in ("raycaster", "analytic_lidar"):
+        # Same ray geometry block for both, so switching modality never changes
+        # the observation layout a checkpoint expects.
         depth_dim = int(sensors["raycaster"]["num_rays"])
         max_range = float(sensors["raycaster"]["max_range_m"])
     elif modality == "camera":
@@ -109,7 +111,9 @@ def build_observation_spec(cfg: Any) -> ObservationSpec:
         depth_dim = int(cam["width"]) * int(cam["height"])
         max_range = float(cam["max_range_m"])
     else:
-        raise ValueError(f"sensors.modality must be 'raycaster' or 'camera', got {modality!r}")
+        raise ValueError(
+            f"sensors.modality must be 'analytic_lidar', 'raycaster' or 'camera', got {modality!r}"
+        )
 
     # Phase 5: inferred payload -- drop payload_mass from the observation.
     use_payload_mass = bool(obs_cfg["use_payload_mass"]) and not bool(
