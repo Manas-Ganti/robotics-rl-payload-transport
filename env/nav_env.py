@@ -733,15 +733,9 @@ class TransportNavEnv(DirectRLEnv):
         what makes the reward locally unit-testable, and it means the tests
         exercise the same code path the A100 runs.
         """
-        robot_xy = self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
-        self.curr_distance = torch.norm(self.goal_pos - robot_xy, dim=-1)
-
-        self.actual_path_length += torch.norm(robot_xy - self.prev_xy, dim=-1)
-        self.prev_xy = robot_xy.clone()
-
-        self.reached_goal = self.curr_distance < self.goal_tolerance
-        self.collided = self._detect_collision()
-
+        # curr_distance / reached_goal / collided were computed THIS step by
+        # _update_step_state(), called from _get_dones() -- which Isaac Lab's
+        # DirectRLEnv.step() runs BEFORE _get_rewards().
         lin_vel = self.robot.data.root_lin_vel_b[:, 0]
 
         state = RewardState(
@@ -805,6 +799,17 @@ class TransportNavEnv(DirectRLEnv):
     # ------------------------------------------------------------------
     # Termination
     # ------------------------------------------------------------------
+    def _update_step_state(self) -> None:
+        """Distance, path length, goal and collision flags for the step just simulated."""
+        robot_xy = self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        self.curr_distance = torch.norm(self.goal_pos - robot_xy, dim=-1)
+
+        self.actual_path_length += torch.norm(robot_xy - self.prev_xy, dim=-1)
+        self.prev_xy = robot_xy.clone()
+
+        self.reached_goal = self.curr_distance < self.goal_tolerance
+        self.collided = self._detect_collision()
+
     def _get_dones(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return ``(terminated, truncated)``.
 
@@ -814,6 +819,13 @@ class TransportNavEnv(DirectRLEnv):
         a timeout as terminated would teach the critic that time running out is
         an absorbing state worth zero -- a subtle and quite damaging bug.
         """
+        # Isaac Lab's step() order is _get_dones -> _get_rewards -> _reset_idx.
+        # So THIS is where the step's state must be computed. Computing it in
+        # _get_rewards (as before) made terminations use the previous step's
+        # flags: every goal/collision was rewarded twice (+200/-100 at t and
+        # t+1) and ended one step late.
+        self._update_step_state()
+
         timed_out = self.episode_length_buf >= self.max_episode_length - 1
         terminated = self.reached_goal | self.collided
 

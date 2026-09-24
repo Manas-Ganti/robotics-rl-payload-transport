@@ -307,9 +307,14 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     start_pos = env.robot.data.root_pos_w[:, :2].clone()
     depth_samples: List[float] = []
 
+    first_step_terms = 0
     for step in range(num_steps):
         actions = torch.rand(env.num_envs, env.action_spec.dim, device=env.device) * 2.0 - 1.0
         obs, rewards, terminated, truncated, info = env.step(actions)
+        if step == 0:
+            # Ground contact miscounted as collision would end ~every env here;
+            # under random actions, collisions later on are expected and fine.
+            first_step_terms = int(terminated.sum().item())
 
         if step % 50 == 0:
             policy_obs = obs["policy"] if isinstance(obs, dict) else obs
@@ -369,12 +374,43 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     collided = sum(r.collided for r in records)
     print(f"  episodes ended    : {ended} ({collided} by collision)")
 
+    # ---- kinematics probe: does "forward" go forward, "left" turn left? -----
+    # A wrong forward axis, swapped wheels, or a flipped wheel sign all still
+    # "move" under random actions -- only commanded, isolated motions show them.
+    obs, _ = env.reset()
+    yaw0 = env._robot_yaw().clone()
+    xy0 = env.robot.data.root_pos_w[:, :2].clone()
+    cmd = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
+    cmd[:, 0] = 1.0                                   # full forward, no turn
+    vx_sum = vy_sum = 0.0
+    for _ in range(50):
+        env.step(cmd)
+        vx_sum += float(env.robot.data.root_lin_vel_b[:, 0].mean().item())
+        vy_sum += float(env.robot.data.root_lin_vel_b[:, 1].abs().mean().item())
+    move = env.robot.data.root_pos_w[:, :2] - xy0
+    heading = torch.stack([torch.cos(yaw0), torch.sin(yaw0)], dim=-1)
+    along = float((move * heading).sum(-1).mean().item())
+    lateral = float((move[:, 0] * heading[:, 1] - move[:, 1] * heading[:, 0]).abs().mean().item())
+    cmd_v = float(env.commands[:, 0].mean().item())
+    print(f"  forward probe     : cmd {cmd_v:.2f} m/s -> body vx {vx_sum / 50:.2f}, |vy| {vy_sum / 50:.2f} m/s; "
+          f"moved {along:+.2f} m along heading, {lateral:.2f} m sideways (1 s)")
+
+    obs, _ = env.reset()
+    cmd[:, 0], cmd[:, 1] = 0.0, 1.0                   # turn left in place
+    wz_sum = 0.0
+    for _ in range(50):
+        env.step(cmd)
+        wz_sum += float(env.robot.data.root_ang_vel_b[:, 2].mean().item())
+    cmd_w = float(env.commands[:, 1].mean().item())
+    print(f"  turn probe        : cmd {cmd_w:+.2f} rad/s -> body wz {wz_sum / 50:+.2f} rad/s")
+
     # ---- directed phase: drive full speed at the goal for 10 s --------------
     # Random actions rarely end an episode in 6 s, so they cannot show that
     # collision detection works. Straight at the goal through obstacles, some
     # robots MUST touch one. Contact hits and edge exits are counted apart.
-    contact0, oob0 = int(env.contact_hit_count.item()), int(env.out_of_bounds_count.item())
     obs, _ = env.reset()
+    env.drain_completed_episodes()   # discard probe-phase episodes
+    contact0, oob0 = int(env.contact_hit_count.item()), int(env.out_of_bounds_count.item())
     forward = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
     for _ in range(500):
         yaw_err = torch.atan2(obs["policy"][:, env.obs_spec.slice_of("goal_pose")][:, 1],
@@ -418,10 +454,19 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     if phys_mass is not None and float(phys_mass.max() - phys_mass.min()) < 1e-6:
         print("  FAIL: PhysX chassis mass is identical across envs -- the payload axis")
         print("        is INERT (apply_mass_modifier did not land).")
-    if ended > 0 and collided / ended > 0.9:
-        print("  FAIL: >90% of episodes end in 'collision' under random actions. That")
-        print("        is ground contact being counted, not obstacles -- check the")
-        print("        filtered contact sensor (force_matrix_w) in _detect_collision.")
+    if first_step_terms > 0.5 * env.num_envs:
+        print("  FAIL: most envs terminated on the very first step. That is ground")
+        print("        contact being counted as collision -- check the filtered contact")
+        print("        sensor (force_matrix_w) in _detect_collision.")
+    if along < 0.2:
+        print("  FAIL: full-forward for 1 s moved < 0.2 m along the heading. Negative ->")
+        print("        wheel sign flipped; ~0 with motion sideways -> the USD's forward")
+        print("        axis is not +x (fix the yaw offset in _robot_yaw / spawn).")
+    if lateral > abs(along):
+        print("  FAIL: the robot moves more sideways than forward -- forward axis mismatch.")
+    if wz_sum / 50 * cmd_w < 0:
+        print("  FAIL: turn command and measured yaw rate have opposite signs -- left and")
+        print("        right wheel joints are swapped (robot.left/right_wheel_joint).")
     if d_contact == 0:
         print("  FAIL: 500 steps driving straight at the goal through obstacles and not")
         print("        one obstacle contact registered -- the filtered contact sensor is")
