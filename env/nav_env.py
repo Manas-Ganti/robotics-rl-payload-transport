@@ -167,19 +167,27 @@ def build_env_cfg(cfg: Config) -> TransportNavEnvCfg:
     out.raw = data
 
     # -- simulation --------------------------------------------------------
-    # VERIFY ON A100: PhysxCfg field names; GPU buffer keys have been renamed
-    # between releases and an unknown key may be silently dropped.
+    # Isaac Lab 2.x: solver ITERATION COUNTS are per-actor (set on the robot's
+    # articulation below); PhysxCfg only holds global min/max clamps and GPU
+    # buffers. Every other `sim.physx` key must be a real PhysxCfg field -- an
+    # unknown key raises here with the valid names, instead of a bare TypeError
+    # (or, worse, being silently dropped by some other code path).
+    physx_yaml = dict(sim_cfg["physx"])
+    solver_pos = int(physx_yaml.pop("solver_position_iteration_count"))
+    solver_vel = int(physx_yaml.pop("solver_velocity_iteration_count"))
+    valid_physx = set(getattr(sim_utils.PhysxCfg, "__dataclass_fields__", {}))
+    unknown = sorted(set(physx_yaml) - valid_physx)
+    if unknown:
+        raise ValueError(
+            f"sim.physx keys not in this Isaac Lab's PhysxCfg: {unknown}. "
+            f"Valid: {sorted(valid_physx)}"
+        )
     out.sim = SimulationCfg(
         dt=float(sim_cfg["dt"]),
         render_interval=int(sim_cfg["decimation"]),
         device=str(sim_cfg["device"]),
         use_fabric=bool(sim_cfg["use_fabric"]),
-        physx=sim_utils.PhysxCfg(
-            solver_position_iteration_count=int(sim_cfg["physx"]["solver_position_iteration_count"]),
-            solver_velocity_iteration_count=int(sim_cfg["physx"]["solver_velocity_iteration_count"]),
-            gpu_max_rigid_contact_count=int(sim_cfg["physx"]["gpu_max_rigid_contact_count"]),
-            gpu_found_lost_pairs_capacity=int(sim_cfg["physx"]["gpu_found_lost_pairs_capacity"]),
-        ),
+        physx=sim_utils.PhysxCfg(**physx_yaml),
     )
 
     # -- scene -------------------------------------------------------------
@@ -192,6 +200,15 @@ def build_env_cfg(cfg: Config) -> TransportNavEnvCfg:
     # -- robot -------------------------------------------------------------
     base_robot_cfg = resolve_robot_cfg(str(robot_cfg["cfg_import_path"]))
     out.robot = base_robot_cfg.replace(prim_path="/World/envs/env_.*/Robot")
+
+    # Per-actor solver iterations (Isaac Lab 2.x moved these off PhysxCfg). The
+    # solver uses the max over actors, clamped to PhysxCfg's min/max range.
+    # ArticulationRootPropertiesCfg fields default to None = "leave the USD
+    # value alone", so creating one here changes only these two settings.
+    art_props = out.robot.spawn.articulation_props or sim_utils.ArticulationRootPropertiesCfg()
+    art_props.solver_position_iteration_count = solver_pos
+    art_props.solver_velocity_iteration_count = solver_vel
+    out.robot.spawn.articulation_props = art_props
 
     # -- contact sensor ----------------------------------------------------
     # VERIFY ON A100: prim path must match the robot's chassis body name.

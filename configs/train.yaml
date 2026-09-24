@@ -39,6 +39,9 @@ sim:
   use_fabric: true
   # VERIFY ON A100: PhysX GPU buffer sizes may need raising for high num_envs.
   physx:
+    # The two solver_* counts are applied to the ROBOT articulation (Isaac Lab
+    # 2.x made them per-actor). Every other key here is passed to PhysxCfg and
+    # must be one of its fields -- build_env_cfg rejects unknown keys by name.
     solver_position_iteration_count: 4
     solver_velocity_iteration_count: 0
     gpu_max_rigid_contact_count: 8388608
