@@ -95,16 +95,19 @@ def _abs(x: Any) -> Any:
 
 
 def _sum_last(x: Any) -> Any:
-    """Sum over the final axis, collapsing per-action-dim values to per-env.
+    """Sum over the final (action-dim) axis, collapsing per-action values to per-env.
 
-    Scalars pass through unchanged so the local tests can use plain floats.
+    The last axis of an action is ALWAYS the action dimension -- ``(A,)`` for a
+    single env, ``(N, A)`` batched -- so it is always reduced. (A previous
+    ``ndim > 1`` guard left a single env's ``(A,)`` unsummed, which then
+    broadcast the whole reward to shape ``(A,)``.) Scalars pass through.
     """
     if np.isscalar(x):
         return x
     if hasattr(x, "sum") and hasattr(x, "dim"):  # torch.Tensor
-        return x.sum(dim=-1) if x.dim() > 1 else x
+        return x.sum(dim=-1) if x.dim() >= 1 else x
     arr = np.asarray(x)
-    return arr.sum(axis=-1) if arr.ndim > 1 else arr
+    return arr.sum(axis=-1) if arr.ndim >= 1 else arr
 
 
 def _as_float(x: Any) -> Any:

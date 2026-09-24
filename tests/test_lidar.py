@@ -261,6 +261,21 @@ class TestSpec:
 # ---------------------------------------------------------------------------
 # Obstacle slots: sim radius == planner radius == lidar radius
 # ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def factory_and_specs():
+    cfg = load_train_config(TRAIN_CONFIG)
+    factory = TerrainFactory(cfg)
+    rng = np.random.default_rng(0)
+    specs = []
+    for density in (0.2, 0.6, 0.9):  # includes the OOD top end
+        params = EpisodeParams(
+            obstacle_density=density, slope_angle_deg=0.0, friction_coeff=0.7,
+            payload_mass_kg=3.0, depth_dropout_prob=0.0, depth_noise_std=0.0,
+        )
+        specs += [factory.generate(params, rng) for _ in range(5)]
+    return factory, specs
+
+
 class TestObstacleSlots:
     def test_pool_radii_span_the_range(self):
         r = pool_slot_radii((0.3, 0.7), 48)
@@ -283,20 +298,6 @@ class TestObstacleSlots:
             obstacles_to_arrays([[obs(0, 0, 0.4, slot=1), obs(1, 1, 0.4, slot=1)]], 4)
         with pytest.raises(ValueError, match="exceeds"):
             obstacles_to_arrays([[obs(0, 0, 0.4, slot=4)]], 4)
-
-    @pytest.fixture(scope="class")
-    def factory_and_specs(self):
-        cfg = load_train_config(TRAIN_CONFIG)
-        factory = TerrainFactory(cfg)
-        rng = np.random.default_rng(0)
-        specs = []
-        for density in (0.2, 0.6, 0.9):  # includes the OOD top end
-            params = EpisodeParams(
-                obstacle_density=density, slope_angle_deg=0.0, friction_coeff=0.7,
-                payload_mass_kg=3.0, depth_dropout_prob=0.0, depth_noise_std=0.0,
-            )
-            specs += [factory.generate(params, rng) for _ in range(5)]
-        return factory, specs
 
     def test_generated_obstacles_use_their_slot_radius(self, factory_and_specs):
         factory, specs = factory_and_specs

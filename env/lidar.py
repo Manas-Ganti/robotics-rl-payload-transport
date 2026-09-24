@@ -213,7 +213,10 @@ def cast_rays_single(
     For tests and CPU-side consumers (e.g. a baseline that wants the same
     sensor as the policy). Uses the exact same :func:`cast_rays`.
     """
-    xyr, valid = obstacles_to_arrays([list(obstacles)], max(len(obstacles), 1))
+    # Slot-bound obstacles index by slot (up to the pool size), so the table
+    # must cover the highest slot, not just the obstacle count.
+    pool = max([len(obstacles), 1] + [o.slot + 1 for o in obstacles if getattr(o, "slot", -1) >= 0])
+    xyr, valid = obstacles_to_arrays([list(obstacles)], pool)
     out = cast_rays(
         np,
         np.asarray([origin_xy], dtype=np.float64),

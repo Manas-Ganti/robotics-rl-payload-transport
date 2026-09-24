@@ -360,6 +360,11 @@ def validate_train_config(data: Mapping[str, Any]) -> None:
     _check_schema_version(data, what="train config")
     _require_keys(data, _REQUIRED_TRAIN_KEYS, what="train config")
 
+    # Gravity randomization is forbidden (CLAUDE.md principle 7). Checked FIRST:
+    # a gravity key in domain.train would otherwise be rejected by the generic
+    # unknown-axis check, and the error would not say WHY it is not allowed.
+    _assert_no_gravity_randomization(data)
+
     if "train" not in data["domain"]:
         raise ConfigError("train config is missing 'domain.train' ranges")
     train_ranges = extract_ranges(data["domain"]["train"], block_name="domain.train")
@@ -369,9 +374,6 @@ def validate_train_config(data: Mapping[str, Any]) -> None:
         raise ConfigError(f"domain.train is missing study axes: {missing_axes}")
 
     validate_reward_config(data["reward"])
-
-    # Gravity randomization is forbidden (CLAUDE.md principle 7).
-    _assert_no_gravity_randomization(data)
 
     if data["env"]["num_envs"] < 1:
         raise ConfigError("env.num_envs must be >= 1")
