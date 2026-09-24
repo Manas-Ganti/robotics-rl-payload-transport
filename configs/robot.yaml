@@ -31,7 +31,10 @@ robot:
 
   # Spawn ------------------------------------------------------------------
   spawn_height_m: 0.05
-  base_mass_kg: 2.5            # nominal chassis mass; payload adds on top
+  # The JetBot USD's chassis mass, as read back from PhysX on the first ARC
+  # smoke test. Used by the pure payload analysis (tip-over margin, mass
+  # ratio); the simulator itself uses the USD value and adds payload on top.
+  base_mass_kg: 2.0
   # Body/prim used for contact sensing and payload attachment.
   # VERIFY ON A100: confirm the root body name in the JetBot USD.
   base_body_name: "chassis"

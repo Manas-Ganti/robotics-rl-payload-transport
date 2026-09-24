@@ -164,6 +164,9 @@ def build_env_cfg(cfg: Config) -> TransportNavEnvCfg:
     out.action_space = 2
     out.observation_space = obs_spec.total_dim
     out.raw = data
+    # Isaac Lab seeds its own RNGs from cfg.seed; unset, it warns "Seed not set"
+    # and env creation is not deterministic (CLAUDE.md principle 6).
+    out.seed = int(data["seed"])
 
     # -- simulation --------------------------------------------------------
     # Isaac Lab 2.x: solver ITERATION COUNTS are per-actor (set on the robot's
@@ -223,7 +226,14 @@ def build_env_cfg(cfg: Config) -> TransportNavEnvCfg:
         prim_path=f"/World/envs/env_.*/Robot/{robot_cfg['base_body_name']}",
         history_length=int(sensors_cfg["contact"]["history_length"]),
         track_air_time=bool(sensors_cfg["contact"]["track_air_time"]),
-        filter_prim_paths_expr=["/World/envs/env_.*/Obstacle_.*"],
+        # ONE expression per pool slot: PhysX requires each filter pattern to
+        # match exactly one prim per env. A single "Obstacle_.*" wildcard
+        # matched all 48 per env and was rejected at sim start ("expected 64,
+        # found 3072"), silently leaving collision detection dead.
+        filter_prim_paths_expr=[
+            f"/World/envs/env_.*/Obstacle_{k}"
+            for k in range(int(data["terrain"]["max_obstacles_per_env"]))
+        ],
     )
 
     # -- exteroceptive sensor ---------------------------------------------
@@ -499,6 +509,9 @@ class TransportNavEnv(DirectRLEnv):
 
         self.goal_tolerance = float(self._raw["env"]["goal_tolerance_m"])
         self.collision_threshold = float(self._raw["env"]["collision_force_threshold"])
+        self._patch_half_m = float(self._raw["env"]["terrain_size_m"]) / 2.0
+        self.contact_hit_count = torch.zeros((), dtype=torch.long, device=device)
+        self.out_of_bounds_count = torch.zeros((), dtype=torch.long, device=device)
         self.max_range_m = float(self._raw["sensors"]["raycaster"]["max_range_m"])
 
         # Analytic lidar state: per-env obstacle table indexed by pool slot, so
@@ -774,7 +787,20 @@ class TransportNavEnv(DirectRLEnv):
         # ends between policy steps; a robot driving INTO a kinematic obstacle
         # stays in contact, so this is expected to be rare. Only the chassis is
         # sensed -- a wheel-only side swipe is not counted.
-        return magnitudes.max(dim=-1)[0] > self.collision_threshold
+        contact_hit = magnitudes.max(dim=-1)[0] > self.collision_threshold
+
+        # Leaving the patch counts as hitting its boundary: the lidar presents
+        # the edge as a wall (analytic_lidar.boundary_as_obstacle), and without
+        # this a robot that drives off the edge falls and idles to timeout.
+        local_xy = self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        out_of_bounds = (local_xy.abs() > self._patch_half_m).any(dim=-1)
+
+        # Diagnostic counters (smoke test): contact and edge exits separately,
+        # so "collision works" cannot be faked by edge exits alone.
+        # Kept on-GPU: .item() here would force a host sync every step.
+        self.contact_hit_count += contact_hit.sum()
+        self.out_of_bounds_count += out_of_bounds.sum()
+        return contact_hit | out_of_bounds
 
     # ------------------------------------------------------------------
     # Termination

@@ -369,6 +369,28 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     collided = sum(r.collided for r in records)
     print(f"  episodes ended    : {ended} ({collided} by collision)")
 
+    # ---- directed phase: drive full speed at the goal for 10 s --------------
+    # Random actions rarely end an episode in 6 s, so they cannot show that
+    # collision detection works. Straight at the goal through obstacles, some
+    # robots MUST touch one. Contact hits and edge exits are counted apart.
+    contact0, oob0 = int(env.contact_hit_count.item()), int(env.out_of_bounds_count.item())
+    obs, _ = env.reset()
+    forward = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
+    for _ in range(500):
+        yaw_err = torch.atan2(obs["policy"][:, env.obs_spec.slice_of("goal_pose")][:, 1],
+                              obs["policy"][:, env.obs_spec.slice_of("goal_pose")][:, 0])
+        forward[:, 0] = 1.0
+        forward[:, 1] = torch.clamp(2.0 * yaw_err, -1.0, 1.0)  # steer at the goal
+        obs, *_ = env.step(forward)
+    directed = env.drain_completed_episodes()
+    d_contact = int(env.contact_hit_count.item()) - contact0
+    d_oob = int(env.out_of_bounds_count.item()) - oob0
+    d_success = sum(r.reached_goal for r in directed)
+    print(
+        f"  directed drive    : {len(directed)} ended | {d_success} success | "
+        f"{d_contact} obstacle contacts | {d_oob} edge exits"
+    )
+
     hit_frac = None
     if env.obs_spec.has("depth"):
         final_depth = obs["policy"] if isinstance(obs, dict) else obs
@@ -400,6 +422,13 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
         print("  FAIL: >90% of episodes end in 'collision' under random actions. That")
         print("        is ground contact being counted, not obstacles -- check the")
         print("        filtered contact sensor (force_matrix_w) in _detect_collision.")
+    if d_contact == 0:
+        print("  FAIL: 500 steps driving straight at the goal through obstacles and not")
+        print("        one obstacle contact registered -- the filtered contact sensor is")
+        print("        dead (check the 'Filter pattern' error in the log, _detect_collision).")
+    if len(directed) > 0 and d_oob / len(directed) > 0.5:
+        print("  FAIL: most directed episodes left the patch -- the start/goal frame or")
+        print("        the goal-bearing observation is likely wrong.")
     if float(env.friction.max() - env.friction.min()) < 1e-6:
         print("  FAIL: friction is identical across envs. The friction axis is INERT;")
         print("        its OOD curve would be a flat artifact. See _apply_friction.")
