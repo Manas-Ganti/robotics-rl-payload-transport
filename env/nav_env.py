@@ -98,6 +98,7 @@ class EpisodeRecord:
     collided: bool
     reached_goal: bool
     timed_out: bool
+    env_id: int = -1   # which parallel env ran it (used by eval/record_clips.py)
 
 
 # ---------------------------------------------------------------------------
@@ -109,8 +110,8 @@ def resolve_robot_cfg(import_path: str, robot_yaml: Mapping[str, Any]) -> Articu
     Isolated so swapping robots is a config edit, never a code edit
     (CLAUDE.md: "Isolate the robot choice in configs/robot.yaml").
 
-    Default: ``env.robots.JETBOT_CFG`` (Isaac Lab 2.x ships no JetBot cfg in
-    isaaclab_assets; env/robots.py is the documented tutorial definition).
+    Default: ``env.robots.make_diff_drive_cfg``, a factory built from the robot
+    YAML (Isaac Lab 2.x ships no cfg for NVIDIA's mobile bases).
     """
     import importlib
 
@@ -1160,6 +1161,7 @@ class TransportNavEnv(DirectRLEnv):
 
             self._completed.append(
                 EpisodeRecord(
+                    env_id=int(env_id),
                     outcome=OUTCOME_NAMES[outcome_code],
                     params=spec.params.as_dict(),
                     optimal_path_length_m=float(spec.optimal_path_length_m),

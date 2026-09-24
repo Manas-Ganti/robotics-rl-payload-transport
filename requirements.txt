@@ -27,6 +27,9 @@ rsl-rl-lib>=2.0.2         # Already installed by `isaaclab.sh --install rsl_rl`
                           # at Isaac Lab's pinned version; this floor must not
                           # force an upgrade past it. VERIFY ON ARC: pip list.
 
+# ---- demo videos (eval/record_clips.py; visuals only) ----
+imageio[ffmpeg]>=2.31     # MP4 writer; bundles its own ffmpeg binary (~30 MB)
+
 # ---- analysis / plotting (runs locally on results CSVs) ----
 matplotlib>=3.7.0
 
