@@ -545,8 +545,10 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
         print("        certifies gaps the robot cannot fit through (unfair collisions).")
         print("        Raise robot_radius_m (and nav2 costmap radius) to the footprint.")
     if max_tilt > 30.0 or drop < -0.05:
-        print("  FAIL: robot tips or is ejected upward at spawn -- robot.spawn_height_m is")
-        print("        below the root's height above the wheels (see arc/inspect_usd.py).")
+        print("  FAIL: robot tips or is ejected upward right after reset. Check, in order:")
+        print("        the joint state is reset (_reset_robot_state); spawn_height_m is >= the")
+        print("        root's height above its lowest point (arc/inspect_usd.py); the payload")
+        print("        sits inside the support polygon (light vs heavy tilt split above).")
     if w_act / max(w_tgt, 1e-6) < 0.7:
         print("  FAIL: wheels reach < 70% of their target speed -- the wheel actuator is")
         print("        too weak for the load (robot.actuator damping / effort_limit).")

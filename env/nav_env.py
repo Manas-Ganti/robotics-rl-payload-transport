@@ -1063,6 +1063,16 @@ class TransportNavEnv(DirectRLEnv):
         root_state[:, 7:] = 0.0                    # zero linear + angular velocity
 
         self.robot.write_root_state_to_sim(root_state, env_ids=idx)
+
+        # Joints too, not just the root: otherwise each episode inherits the
+        # last one's wheel spin (up to ~5 rad/s) and caster swivel angle. On
+        # Carter the stiff wheel drive then brakes that spin at reset and rocks
+        # the chassis back onto its caster (ARC smoke test: up to 43 deg,
+        # tail-down, payload-independent), and a sideways caster drags the robot
+        # off heading. Standard Isaac Lab reset: write the default joint state.
+        joint_pos = self.robot.data.default_joint_pos[idx].clone()
+        joint_vel = self.robot.data.default_joint_vel[idx].clone()
+        self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=idx)
         self.robot.reset(env_ids=idx)
 
     def _apply_payload_mass(self, env_ids: Any, specs: List[TerrainSpec]) -> None:
