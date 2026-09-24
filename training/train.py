@@ -516,6 +516,54 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
         f"{d_contact} obstacle contacts | {d_oob} edge exits"
     )
 
+    # ---- physics probes: forced conditions, measured responses ---------------
+    # Absence of an error is not evidence an axis works (setup_notes Tier 1).
+    # Each probe pins one condition and measures what the physics does.
+    wheel_ids = env._wheel_joint_ids
+    radius = float(env._raw["robot"]["wheel_radius_m"])
+    base = env.sampler.sample().with_overrides(
+        obstacle_density=float(env._raw["domain"]["train"]["obstacle_density"][0]),
+        slope_angle_deg=0.0, depth_dropout_prob=0.0, depth_noise_std=0.0,
+    )
+
+    def launch_slip(friction: float) -> float:
+        """Full throttle from rest for 0.5 s: 1 - body speed / wheel surface speed."""
+        env.set_forced_params(base.with_overrides(friction_coeff=friction))
+        env.reset()
+        go = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
+        go[:, 0] = 1.0
+        surf = body = 0.0
+        for _ in range(25):
+            env.step(go)
+            surf += float((env.robot.data.joint_vel[:, wheel_ids].abs().mean(dim=-1) * radius).mean().item())
+            body += float(env.robot.data.root_lin_vel_b[:, 0].mean().item())
+        return 1.0 - body / max(surf, 1e-6)
+
+    slip_hi, slip_lo = launch_slip(0.9), launch_slip(0.1)
+    print(f"  friction probe    : launch slip {slip_hi:.2f} at mu=0.9 vs {slip_lo:.2f} at mu=0.1 "
+          f"(must differ -- else the friction axis is inert)")
+
+    # Slope: on a 10 deg patch the robot must come to rest on the TILTED ground,
+    # at the same height above it as on flat ground. A wrong tilt sign puts the
+    # ground where height_at() says it is not.
+    rest_flat = None
+    heights = {}
+    for slope in (0.0, 10.0):
+        env.set_forced_params(base.with_overrides(friction_coeff=0.9, slope_angle_deg=slope))
+        env.reset()
+        for _ in range(50):   # 1 s idle to settle
+            env.step(torch.zeros(env.num_envs, env.action_spec.dim, device=env.device))
+        local = env.robot.data.root_pos_w[:, :3] - env.scene.env_origins[:, :3]
+        ground = torch.tensor(
+            [env._terrain_specs[i].height_at(float(local[i, 0]), float(local[i, 1])) for i in range(env.num_envs)],
+            device=env.device,
+        )
+        heights[slope] = local[:, 2] - ground   # root height above the expected surface
+    above_flat, above_slope = heights[0.0], heights[10.0]
+    print(f"  slope probe       : root above expected ground {above_flat.mean().item():.3f} m flat vs "
+          f"{above_slope.mean().item():.3f} m on 10 deg (spread {above_slope.std().item():.3f})")
+    env.set_forced_params(None)
+
     hit_frac = None
     if env.obs_spec.has("depth"):
         final_depth = obs["policy"] if isinstance(obs, dict) else obs
@@ -568,6 +616,13 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     if wz_sum / 50 * cmd_w < 0:
         print("  FAIL: turn command and measured yaw rate have opposite signs -- left and")
         print("        right wheel joints are swapped (robot.left/right_wheel_joint).")
+    if abs(slip_lo - slip_hi) < 0.05:
+        print("  FAIL: wheel slip barely changes between friction 0.9 and 0.1 -- the")
+        print("        friction axis is INERT (check the wheel material's combine mode vs")
+        print("        the ground's 'min'; the higher-priority mode wins in PhysX).")
+    if abs(above_slope.mean().item() - above_flat.mean().item()) > 0.05 or above_slope.std().item() > 0.05:
+        print("  FAIL: on a 10 deg slope the robot does not rest where TerrainSpec.height_at")
+        print("        puts the ground -- tilt sign/axis mismatch (_apply_ground_slope).")
     if d_contact == 0:
         print("  FAIL: 500 steps driving straight at the goal through obstacles and not")
         print("        one obstacle contact registered -- the filtered contact sensor is")

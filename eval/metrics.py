@@ -71,6 +71,10 @@ class CellMetrics:
     mean_final_distance_m: float
     success_ci_low: float = 0.0
     success_ci_high: float = 0.0
+    # False when the cell is physically impossible for ANY policy (e.g. the
+    # motors cannot climb that slope with that payload). Reported, but excluded
+    # from the degradation classification -- see classify_degradation.
+    feasible: bool = True
 
     def as_row(self) -> Dict[str, Any]:
         return asdict(self)
@@ -182,6 +186,7 @@ def aggregate_cell(
     bootstrap_samples: int = 1000,
     ci_level: float = 0.95,
     seed: int = 0,
+    feasible: bool = True,
 ) -> CellMetrics:
     """Aggregate all episodes at one grid point into a single metrics row."""
     ci_low, ci_high = (0.0, 0.0)
@@ -202,6 +207,7 @@ def aggregate_cell(
         mean_final_distance_m=mean_final_distance(results),
         success_ci_low=ci_low,
         success_ci_high=ci_high,
+        feasible=feasible,
     )
 
 
@@ -224,6 +230,7 @@ class DegradationProfile:
     max_drop_at: Optional[float]      # axis value where that drop occurs
     classification: str               # "graceful" | "catastrophic" | "robust" | "undefined"
     cliff_threshold: float
+    infeasible_values: List[float] = field(default_factory=list)  # excluded cells
 
     def as_row(self) -> Dict[str, Any]:
         return asdict(self)
@@ -251,13 +258,20 @@ def classify_degradation(
 
     Cells must be ordered along the axis in the direction of INCREASING
     difficulty. The harness guarantees this; see ``eval/ood_harness.py``.
+
+    Physically INFEASIBLE cells (``feasible=False``) are excluded from the
+    means and from cliff detection, and listed in ``infeasible_values``. A drop
+    at a cell no policy can pass is the robot's limit, not the policy's.
     """
+    all_cells = list(cells)
+    infeasible_values = [c.value for c in all_cells if not c.feasible]
+    cells = [c for c in all_cells if c.feasible]
     if len(cells) < 2:
         return DegradationProfile(
-            axis=cells[0].axis if cells else "unknown",
-            values=[c.value for c in cells],
-            success_rates=[c.success_rate for c in cells],
-            regimes=[c.regime for c in cells],
+            axis=all_cells[0].axis if all_cells else "unknown",
+            values=[c.value for c in all_cells],
+            success_rates=[c.success_rate for c in all_cells],
+            regimes=[c.regime for c in all_cells],
             in_distribution_mean=0.0,
             ood_mean=0.0,
             retention=0.0,
@@ -265,6 +279,7 @@ def classify_degradation(
             max_drop_at=None,
             classification="undefined",
             cliff_threshold=cliff_drop_threshold,
+            infeasible_values=infeasible_values,
         )
 
     rates = [c.success_rate for c in cells]
@@ -295,9 +310,9 @@ def classify_degradation(
 
     return DegradationProfile(
         axis=cells[0].axis,
-        values=values,
-        success_rates=rates,
-        regimes=regimes,
+        values=[c.value for c in all_cells],
+        success_rates=[c.success_rate for c in all_cells],
+        regimes=[c.regime for c in all_cells],
         in_distribution_mean=in_dist_mean,
         ood_mean=ood_mean,
         retention=retention,
@@ -305,6 +320,7 @@ def classify_degradation(
         max_drop_at=max_drop_at,
         classification=classification,
         cliff_threshold=cliff_drop_threshold,
+        infeasible_values=infeasible_values,
     )
 
 

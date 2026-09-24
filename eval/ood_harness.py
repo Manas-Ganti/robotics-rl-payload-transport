@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tupl
 import numpy as np
 
 from env.config import Config, Range, classify_point, get_ood_ranges, get_train_ranges
+from env.payload import climb_feasible
 from env.randomization import EpisodeParams, params_from_grid_point
 from eval.metrics import (
     CellMetrics,
@@ -184,6 +185,10 @@ class OODHarness:
 
             for value, regime in self.grid_points(axis):
                 results = self._run_cell(policy, axis=axis, value=value)
+                cell_params = params_from_grid_point(self.nominal, axis=axis, value=value)
+                feasible = climb_feasible(
+                    self.data["train"]["robot"], cell_params.payload_mass_kg, cell_params.slope_angle_deg
+                )
 
                 cell = aggregate_cell(
                     results,
@@ -194,6 +199,7 @@ class OODHarness:
                     bootstrap_samples=int(self.metrics_cfg.get("bootstrap_samples", 1000)),
                     ci_level=float(self.metrics_cfg.get("ci_level", 0.95)),
                     seed=self.seed,
+                    feasible=feasible,
                 )
                 axis_cells.append(cell)
                 all_cells.append(cell)
@@ -210,6 +216,7 @@ class OODHarness:
                     f"timeout={cell.timeout_rate:.2f} "
                     f"path_eff={cell.path_efficiency:.2f} "
                     f"(n={cell.num_episodes})"
+                    + ("" if feasible else "  [INFEASIBLE: exceeds motor torque cap]")
                 )
 
             profile = classify_degradation(

@@ -163,6 +163,12 @@ def print_results_table(result: Any) -> None:
         )
 
     print("-" * 78)
+    for axis, profile in result.profiles.items():
+        if profile.infeasible_values:
+            print(
+                f"{axis}: EXCLUDED as physically infeasible (motor torque cap): "
+                f"{profile.infeasible_values}"
+            )
     print(
         "retention = ood_success / in_dist_success   |   "
         "class: robust (>=0.9) / graceful / catastrophic (cliff)"

@@ -69,6 +69,40 @@ class PayloadSpec:
         )
 
 
+def climb_torque_per_wheel_nm(
+    total_mass_kg: float,
+    slope_deg: float,
+    wheel_radius_m: float,
+    drive_wheels: int = 2,
+    gravity_mps2: float = 9.81,
+) -> float:
+    """Wheel torque needed just to hold position on a slope: (M g sin(t) / n) * r.
+
+    Ignores rolling resistance and acceleration, so it is a LOWER bound: a cell
+    needing more than the motor cap is infeasible for ANY policy.
+    """
+    force = total_mass_kg * gravity_mps2 * math.sin(math.radians(slope_deg))
+    return force / drive_wheels * wheel_radius_m
+
+
+def climb_feasible(robot: Mapping[str, Any], payload_mass_kg: float, slope_deg: float) -> bool:
+    """Can the robot's motors climb this slope with this payload at all?
+
+    Uses the robot YAML block (base_mass_kg, wheel_radius_m,
+    actuator.effort_limit_sim). An unlimited cap (null) is always feasible.
+    A grid cell that fails this says nothing about generalization -- no policy
+    can succeed there -- so the degradation classifier excludes it (README:
+    "An impossible cell").
+    """
+    cap = robot.get("actuator", {}).get("effort_limit_sim")
+    if cap is None:
+        return True
+    need = climb_torque_per_wheel_nm(
+        float(robot["base_mass_kg"]) + float(payload_mass_kg), slope_deg, float(robot["wheel_radius_m"])
+    )
+    return need <= float(cap)
+
+
 def box_inertia_diagonal(mass_kg: float, size_m: Sequence[float]) -> Tuple[float, float, float]:
     """Diagonal inertia tensor of a uniform-density box about its own centre.
 
