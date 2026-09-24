@@ -40,7 +40,10 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 # no contact sensor; we need it.
 JETBOT_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/NVIDIA/Jetbot/jetbot.usd",
+        # Isaac Sim 4.5 layout (verified on ARC: HTTP 200). The current Isaac Lab
+        # docs show Robots/NVIDIA/Jetbot/ -- that is the Isaac Sim 5.x layout
+        # and does not exist on the 4.5 content server.
+        usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Jetbot/jetbot.usd",
         activate_contact_sensors=True,
     ),
     actuators={
