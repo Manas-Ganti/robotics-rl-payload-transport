@@ -45,7 +45,19 @@ robot:
   actuator:
     stiffness: 0.0
     damping: null              # USD: 17453 (per-degree units), velocity-style drive
-    effort_limit: null         # USD maxForce = inf (unlimited torque)
+    # Per-wheel torque cap (N*m), applied by PhysX. The USD ships maxForce = inf,
+    # which would make payload and slope irrelevant to what the motors can do.
+    # DERIVATION (stated, not tuned): climbing needs, per wheel,
+    #     tau = (M * g * sin(theta) / 2) * r,   r = 0.2745 m, M = 76.2 kg + payload
+    #   train extreme  (45 kg, 10 deg): M = 121.2 kg -> 28.3 N*m
+    #   x 1.5 margin (acceleration + caster/rolling losses)  ->  42.5 N*m
+    #   OOD mid        (55 kg, 12 deg): M = 131.2 kg -> 36.8 N*m   (within cap)
+    #   OOD extreme    (90 kg, 20 deg): M = 166.2 kg -> 76.5 N*m   (motor-limited)
+    # So every training condition is climbable with margin and the held-out
+    # extremes degrade physically -- the regime the study is designed to probe.
+    # Written as effort_limit_sim: for IMPLICIT actuators that is the value
+    # PhysX enforces (Isaac Lab 2.x; plain effort_limit is not the sim cap).
+    effort_limit_sim: 42.5
 
   # Spawn ------------------------------------------------------------------
   # Must be >= "root above lowest" from inspect_usd.py, or the wheels spawn

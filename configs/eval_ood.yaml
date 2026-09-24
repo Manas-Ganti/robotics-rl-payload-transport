@@ -34,7 +34,7 @@ domain:
     obstacle_density:   [0.7, 0.9]     # train: [0.2, 0.6]
     slope_angle_deg:    [12.0, 20.0]   # train: [0.0, 10.0]
     friction_coeff:     [0.1, 0.3]     # train: [0.4, 0.9]
-    payload_mass_kg:    [6.0, 9.0]     # train: [1.0, 5.0]
+    payload_mass_kg:    [55.0, 90.0]   # train: [10.0, 45.0]  (70-120% of Carter's 76.2 kg)
     depth_dropout_prob: [0.15, 0.40]   # train: [0.0, 0.05]  ("severe")
     depth_noise_std:    [0.08, 0.25]   # train: [0.0, 0.02]  ("severe")
 
@@ -48,7 +48,7 @@ nominal:
   obstacle_density:   0.4
   slope_angle_deg:    0.0
   friction_coeff:     0.7
-  payload_mass_kg:    3.0
+  payload_mass_kg:    25.0
   depth_dropout_prob: 0.0
   depth_noise_std:    0.0
 
@@ -76,7 +76,7 @@ grid:
 
   payload_mass_kg:
     enabled: true
-    points: [1.0, 3.0, 5.0, 6.0, 7.5, 9.0]
+    points: [10.0, 25.0, 45.0, 55.0, 70.0, 90.0]
 
   depth_dropout_prob:
     enabled: false             # enable with phases.enable_sensor_noise (Phase 4)

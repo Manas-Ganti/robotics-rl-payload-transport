@@ -123,8 +123,10 @@ class TestTrainOODSplit:
         train_data = load_yaml(TRAIN_CONFIG)
         eval_data = load_yaml(EVAL_CONFIG)
 
-        # Contaminate: make the OOD payload range overlap the training range.
-        eval_data["domain"]["ood"]["payload_mass_kg"] = [4.0, 9.0]
+        # Contaminate: make the OOD payload range overlap the training range
+        # (derived from the config, so the test survives range changes).
+        lo, hi = train_data["domain"]["train"]["payload_mass_kg"]
+        eval_data["domain"]["ood"]["payload_mass_kg"] = [(lo + hi) / 2.0, hi * 2.0]
 
         train_path = tmp_path / "train.yaml"
         eval_path = tmp_path / "eval.yaml"

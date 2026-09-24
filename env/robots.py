@@ -34,6 +34,8 @@ def make_diff_drive_cfg(robot: Mapping[str, Any]) -> ArticulationCfg:
       target and fight the robot's own motion.
     * Velocity control: stiffness 0, damping = velocity gain. ``null`` in YAML
       keeps the USD's own value for that field.
+    * Torque cap: ``effort_limit_sim`` -- for implicit actuators, the limit
+      PhysX actually enforces (plain ``effort_limit`` is not the sim cap).
     * ``activate_contact_sensors=True``: ContactSensor (our collision ground
       truth) only works on prims spawned with contact reporting enabled.
     """
@@ -46,7 +48,7 @@ def make_diff_drive_cfg(robot: Mapping[str, Any]) -> ArticulationCfg:
                 joint_names_expr=[robot["left_wheel_joint"], robot["right_wheel_joint"]],
                 stiffness=act["stiffness"],
                 damping=act["damping"],
-                effort_limit=act["effort_limit"],
+                effort_limit_sim=act["effort_limit_sim"],
             )
         },
     )

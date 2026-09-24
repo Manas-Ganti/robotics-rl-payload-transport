@@ -79,10 +79,10 @@ observations:
   clip_range: [-10.0, 10.0]
   normalize: true
   # Observation-space normalizer for payload mass. MUST exceed the OOD ceiling
-  # (9.0 kg in eval_ood.yaml), not just the training ceiling -- otherwise heavy
+  # (90 kg in eval_ood.yaml), not just the training ceiling -- otherwise heavy
   # OOD payloads saturate and become indistinguishable to the policy, flattening
   # the payload robustness curve for a representational rather than physical reason.
-  payload_mass_norm_kg: 12.0
+  payload_mass_norm_kg: 100.0
 
 # ---------------------------------------------------------------------------
 # DOMAIN RANDOMIZATION -- INNER (TRAINING) RANGES.
@@ -94,7 +94,10 @@ domain:
     obstacle_density:   [0.2, 0.6]     # fraction of free cells seeded as obstacles
     slope_angle_deg:    [0.0, 10.0]    # only applied when phases.enable_slope
     friction_coeff:     [0.4, 0.9]     # ground static/dynamic friction
-    payload_mass_kg:    [1.0, 5.0]     # transported payload mass
+    # Scaled to Carter (76.2 kg robot): 13-60% of robot mass. The original
+    # 1-5 kg was sized for the 2 kg JetBot and is 1-7% of Carter -- too small
+    # to matter physically.
+    payload_mass_kg:    [10.0, 45.0]   # transported payload mass
     depth_dropout_prob: [0.0, 0.05]    # "mild" sensor degradation
     depth_noise_std:    [0.0, 0.02]    # "mild" sensor degradation (metres)
 
@@ -181,7 +184,7 @@ reward:
     energy_under_load:
       enabled: false
       weight: 0.01             # scales with payload mass * |v| * dt
-  payload_mass_norm_kg: 5.0    # normalizer for energy term (top of training range)
+  payload_mass_norm_kg: 45.0   # normalizer for energy term (top of training range)
 
 # ---------------------------------------------------------------------------
 # RL algorithm. PPO default; SAC behind a switch (lowest priority per CLAUDE.md).
