@@ -10,16 +10,14 @@ schema_version: 1
 
 robot:
   name: "jetbot"
-  # Isaac Lab ships a differential-drive JetBot config:
-  #     from isaaclab_assets.robots.jetbot import JETBOT_CFG
-  # We reference it by import path so nav_env.py can resolve it dynamically.
-  #
-  # VERIFY ON A100: confirm this import path on the installed Isaac Lab version.
-  #   Isaac Lab 1.x : isaaclab_assets.robots.jetbot.JETBOT_CFG
-  #   Orbit (older) : omni.isaac.orbit_assets.jetbot.JETBOT_CFG
-  # Alternative built-in mobile bases if JetBot proves unsuitable:
-  #   isaaclab_assets.robots.carter.CARTER_CFG  (NVIDIA Carter, diff-drive)
-  cfg_import_path: "isaaclab_assets.robots.jetbot.JETBOT_CFG"
+  # Isaac Lab 2.x ships no JetBot config in isaaclab_assets; env/robots.py
+  # holds the definition from the official Isaac Lab tutorial, using NVIDIA's
+  # built-in JetBot USD. Resolved by import path so swapping robots stays a
+  # config edit.
+  cfg_import_path: "env.robots.JETBOT_CFG"
+  # null -> NVIDIA's Nucleus/S3 asset. Set a local .usd path here if compute
+  # nodes cannot reach the content server (download once on the login node).
+  usd_path: null
 
   # Drivetrain -------------------------------------------------------------
   drive_type: "differential"

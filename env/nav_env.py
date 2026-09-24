@@ -103,9 +103,8 @@ def resolve_robot_cfg(import_path: str) -> ArticulationCfg:
     Isolated so swapping robots is a config edit, never a code edit
     (CLAUDE.md: "Isolate the robot choice in configs/robot.yaml").
 
-    VERIFY ON A100: confirm the import path resolves on the installed version.
-        default : isaaclab_assets.robots.jetbot.JETBOT_CFG
-        older   : omni.isaac.orbit_assets.jetbot.JETBOT_CFG
+    Default: ``env.robots.JETBOT_CFG`` (Isaac Lab 2.x ships no JetBot cfg in
+    isaaclab_assets; env/robots.py is the documented tutorial definition).
     """
     import importlib
 
@@ -200,6 +199,9 @@ def build_env_cfg(cfg: Config) -> TransportNavEnvCfg:
     # -- robot -------------------------------------------------------------
     base_robot_cfg = resolve_robot_cfg(str(robot_cfg["cfg_import_path"]))
     out.robot = base_robot_cfg.replace(prim_path="/World/envs/env_.*/Robot")
+    if robot_cfg.get("usd_path"):
+        # Local copy of the asset, for compute nodes without content-server access.
+        out.robot.spawn = out.robot.spawn.replace(usd_path=str(robot_cfg["usd_path"]))
 
     # Per-actor solver iterations (Isaac Lab 2.x moved these off PhysxCfg). The
     # solver uses the max over actors, clamped to PhysxCfg's min/max range.

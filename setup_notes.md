@@ -186,7 +186,10 @@ prints explicit `FAIL:` lines. **Run it first.**
 - [ ] **Isaac Lab import paths** — `isaaclab.*` vs legacy `omni.isaac.orbit.*`
       (`env/nav_env.py` top-level imports).
 - [ ] **Robot cfg import path** — `configs/robot.yaml: robot.cfg_import_path`
-      (`isaaclab_assets.robots.jetbot.JETBOT_CFG`). Fallback: `CARTER_CFG`.
+      now `env.robots.JETBOT_CFG` — Isaac Lab 2.x ships no JetBot cfg, so
+      `env/robots.py` holds the official tutorial definition (NVIDIA's JetBot
+      USD, `activate_contact_sensors=True`). If compute nodes cannot fetch the
+      USD from Nucleus/S3, set `robot.usd_path` to a local copy.
 - [ ] **Wheel joint names** — print `robot.joint_names`; reconcile with
       `robot.left_wheel_joint` / `right_wheel_joint`.
 - [ ] **Chassis body name** — `robot.base_body_name` must match the USD, or the
