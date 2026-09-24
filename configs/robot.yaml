@@ -31,15 +31,18 @@ robot:
 
   # Drivetrain -------------------------------------------------------------
   drive_type: "differential"
-  # Collision cylinders measure 0.278 (left) / 0.271 (right); the mean is used.
-  # (NVIDIA's controller docs quote 0.24 -- but PhysX rolls on the collision
-  # shape, so the measurement is what the simulator actually does.)
-  wheel_radius_m: 0.2745
+  # 0.24: collision cylinder radius attr 0.5 x world scale 0.48, matching
+  # NVIDIA's Carter controller docs, and CONFIRMED on ARC: the robot rests with
+  # its root 0.240 m above flat ground (wheel centres sit ~1 cm below the root).
+  # An earlier value of 0.2745 came from the bounding box of the wheels AS
+  # ROTATED in the USD, which overstates a spinning cylinder's radius -- it made
+  # every command 12.6% too slow (actual = commanded x 0.24/0.2745).
+  wheel_radius_m: 0.24
   wheel_base_m: 0.5384         # between collision-cylinder centres
   left_wheel_joint: "left_wheel"
   right_wheel_joint: "right_wheel"
-  # Caps wheel speed; action.lin_vel_range tops out at 1.5 m/s = 1.5/0.2745.
-  max_wheel_speed_rad_s: 5.5
+  # Caps wheel speed; action.lin_vel_range tops out at 1.5 m/s.
+  max_wheel_speed_rad_s: 6.3   # >= 1.5 m/s / 0.24 m = 6.25 rad/s
   # Only the two wheels are actuated (casters stay passive). Velocity control:
   # stiffness 0, damping = velocity gain; null keeps the USD's value.
   actuator:
@@ -48,21 +51,31 @@ robot:
     # Per-wheel torque cap (N*m), applied by PhysX. The USD ships maxForce = inf,
     # which would make payload and slope irrelevant to what the motors can do.
     # DERIVATION (stated, not tuned): climbing needs, per wheel,
-    #     tau = (M * g * sin(theta) / 2) * r,   r = 0.2745 m, M = 76.2 kg + payload
-    #   train extreme  (45 kg, 10 deg): M = 121.2 kg -> 28.3 N*m
-    #   x 1.5 margin (acceleration + caster/rolling losses)  ->  42.5 N*m
-    #   OOD mid        (55 kg, 12 deg): M = 131.2 kg -> 36.8 N*m   (within cap)
-    #   OOD extreme    (90 kg, 20 deg): M = 166.2 kg -> 76.5 N*m   (motor-limited)
+    #     tau = (M * g * sin(theta) / 2) * r,   r = 0.24 m, M = 76.2 kg + payload
+    #   train extreme  (45 kg, 10 deg): M = 121.2 kg -> 24.8 N*m
+    #   x 1.5 margin (acceleration + caster/rolling losses)  ->  37.2 N*m
+    #   OOD mid        (55 kg, 12 deg): M = 131.2 kg -> 32.1 N*m   (within cap)
+    #   OOD extreme    (90 kg, 20 deg): M = 166.2 kg -> 66.9 N*m   (motor-limited)
+    #   slope sweep @ nominal 25 kg: 15 deg -> 30.8 (ok), 20 deg -> 40.7 (INFEASIBLE)
     # So every training condition is climbable with margin and the held-out
     # extremes degrade physically -- the regime the study is designed to probe.
     # Written as effort_limit_sim: for IMPLICIT actuators that is the value
     # PhysX enforces (Isaac Lab 2.x; plain effort_limit is not the sim cap).
-    effort_limit_sim: 42.5
+    effort_limit_sim: 37.2
+
+  # Tyre friction written onto the robot's contact materials at startup.
+  # Carter's USD wheel material is low-friction, and with the ground's "min"
+  # combine rule contact friction = min(ground, wheel): the ground value never
+  # reached the tyre, so the friction study axis was INERT (ARC probe: launch
+  # slip 0.58 at ground mu 0.9 AND 0.1). Rubber on hard floor ~ 1.0 lets the
+  # sampled ground friction govern (holds for wheel combine modes average /
+  # min / multiply; only "max" would defeat it -- the smoke probe checks).
+  tire_friction: 1.0
 
   # Spawn ------------------------------------------------------------------
   # Must be >= "root above lowest" from inspect_usd.py, or the wheels spawn
   # inside the ground and PhysX ejects the robot. Too high only costs a short drop.
-  spawn_height_m: 0.30         # root sits 0.288 m above the lowest collision point
+  spawn_height_m: 0.30         # root rests 0.240 m above flat ground (measured) -> ~6 cm drop
   # Whole-robot mass (chassis 45.9 + 20.0 ballast + wheels 8.4 + caster 1.8 +
   # imu 0.1), for the pure payload analysis (tip-over, mass ratio). The sim
   # uses the USD masses and adds the payload to chassis_link.

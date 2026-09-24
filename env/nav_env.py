@@ -335,6 +335,7 @@ class TransportNavEnv(DirectRLEnv):
         # `_preallocate()` called before super().__init__ using
         # `cfg.scene.num_envs` and `cfg.sim.device` directly.
         self._init_buffers()
+        self._apply_tire_friction()
 
     # ------------------------------------------------------------------
     # Scene construction
@@ -500,6 +501,25 @@ class TransportNavEnv(DirectRLEnv):
         # VERIFY ON A100: the FixedJoint weld (env/payload.py::attach_payload_joint)
         # must be created on the stage after cloning. If the payload lags or
         # falls through the chassis, that joint is the first thing to check.
+
+    def _apply_tire_friction(self) -> None:
+        """Write ``robot.tire_friction`` onto every robot contact shape, all envs.
+
+        Carter's USD wheel material is low-friction; with the ground's "min"
+        combine rule, contact friction = min(ground, wheel), so the sampled
+        ground friction never reached the tyre and the friction axis was inert
+        (ARC probe: identical launch slip at ground mu 0.9 and 0.1). Only the
+        wheels and the caster touch the floor (the payload has no collider; the
+        chassis rides clear), so one value for all robot shapes is exact.
+        Same full-tensor read-modify-write as Isaac Lab's material randomizer.
+        """
+        mu = float(self._raw["robot"]["tire_friction"])
+        view = self.robot.root_physx_view
+        props = view.get_material_properties().clone()   # (N, num_shapes, 3)
+        props[..., 0] = mu            # static
+        props[..., 1] = mu            # dynamic
+        props[..., 2] = 0.0           # restitution
+        view.set_material_properties(props, torch.arange(self.num_envs, dtype=torch.long))
 
     # ------------------------------------------------------------------
     # Buffers

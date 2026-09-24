@@ -516,6 +516,15 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
         f"{d_contact} obstacle contacts | {d_oob} edge exits"
     )
 
+    # Snapshot every spread checked below BEFORE the probes: they force all
+    # envs to one condition, which would make these read as "identical".
+    fric_spread = float(phys_fric.max() - phys_fric.min())
+    mass_spread = None if phys_mass is None else float(phys_mass.max() - phys_mass.min())
+    sampled_fric_spread = float(env.friction.max() - env.friction.min())
+    robot_mu = env.robot.root_physx_view.get_material_properties()[:, :, 0]
+    print(f"  tyre friction     : {robot_mu.min().item():.2f} - {robot_mu.max().item():.2f} "
+          f"(robot contact shapes; config {env._raw['robot']['tire_friction']})")
+
     # ---- physics probes: forced conditions, measured responses ---------------
     # Absence of an error is not evidence an axis works (setup_notes Tier 1).
     # Each probe pins one condition and measures what the physics does.
@@ -585,10 +594,10 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     if hit_frac is not None and hit_frac < 0.01:
         print("  FAIL: almost no ray hits anything. With obstacles present this means")
         print("        the sensor is blind (check sensors.modality and obstacle_valid).")
-    if float(phys_fric.max() - phys_fric.min()) < 1e-6:
+    if fric_spread < 1e-6:
         print("  FAIL: PhysX ground friction is identical across envs -- the write in")
         print("        _apply_friction did not land. The friction axis is INERT.")
-    if phys_mass is not None and float(phys_mass.max() - phys_mass.min()) < 1e-6:
+    if mass_spread is not None and mass_spread < 1e-6:
         print("  FAIL: PhysX payload mass is identical across envs -- the payload axis")
         print("        is INERT (the mass write in _apply_payload_mass did not land).")
     if first_step_terms > 0.5 * env.num_envs:
@@ -630,7 +639,7 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     if len(directed) > 0 and d_oob / len(directed) > 0.5:
         print("  FAIL: most directed episodes left the patch -- the start/goal frame or")
         print("        the goal-bearing observation is likely wrong.")
-    if float(env.friction.max() - env.friction.min()) < 1e-6:
+    if sampled_fric_spread < 1e-6:
         print("  FAIL: friction is identical across envs. The friction axis is INERT;")
         print("        its OOD curve would be a flat artifact. See _apply_friction.")
     print("  (no FAIL lines above means Phase 0 bring-up passed)")

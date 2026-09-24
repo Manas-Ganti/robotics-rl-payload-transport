@@ -93,6 +93,7 @@ def main(path: str) -> None:
     print("\n-- collision shapes (metres, computed from shape attributes) --")
     root_path = root.GetPath()
     world = {}
+    true_radius = {}
     for prim in stage.Traverse():
         if not prim.HasAPI(UsdPhysics.CollisionAPI) or not prim.GetPath().HasPrefix(root_path):
             continue
@@ -113,8 +114,18 @@ def main(path: str) -> None:
         world.setdefault(bname, []).append((lo, hi))
         size = [hi[i] - lo[i] for i in range(3)]
         center = [(hi[i] + lo[i]) / 2 for i in range(3)]
+        extra = ""
+        # A ROTATED cylinder's bounding box overstates its radius (the earlier
+        # 0.278/0.271 "wheel radius" was exactly that). Read it from the shape:
+        # radius attr x the world scale of a direction perpendicular to its axis.
+        if prim.IsA(UsdGeom.Cylinder) or prim.IsA(UsdGeom.Capsule):
+            axis = prim.GetAttribute("axis").Get() or "Z"
+            perp = Gf.Vec3d(0, 0, 1) if axis in ("X", "Y") else Gf.Vec3d(1, 0, 0)
+            r_world = float(prim.GetAttribute("radius").Get()) * m.TransformDir(perp).GetLength() * mpu
+            true_radius[bname] = r_world
+            extra = f"  radius={r_world:.4f} (attr x scale, axis {axis})"
         print(f"  {bname:<18} {prim.GetTypeName():<9} size={['%.3f' % v for v in size]} "
-              f"center={['%.3f' % v for v in center]}")
+              f"center={['%.3f' % v for v in center]}{extra}")
 
     allb = [b for boxes in world.values() for b in boxes]
     if allb:
@@ -137,7 +148,9 @@ def main(path: str) -> None:
             lo = [min(b[0][i] for b in boxes) for i in range(3)]
             hi = [max(b[1][i] for b in boxes) for i in range(3)]
             wc[name] = [(lo[i] + hi[i]) / 2 for i in range(3)]
-            print(f"  wheel {name:<12}: radius {(hi[2] - lo[2]) / 2:.4f}  center={['%.3f' % c for c in wc[name]]}")
+            r = true_radius.get(prim.GetName())
+            r_txt = f"{r:.4f} (from shape attributes)" if r is not None else f"~{(hi[2] - lo[2]) / 2:.4f} (bbox; unreliable if rotated)"
+            print(f"  wheel {name:<12}: radius {r_txt}  center={['%.3f' % c for c in wc[name]]}")
     if len(wc) >= 2:
         (n1, c1), (n2, c2) = list(wc.items())[:2]
         print(f"  wheel separation   : {math.dist(c1, c2):.4f}  (collision-cylinder centres {n1} <-> {n2})")

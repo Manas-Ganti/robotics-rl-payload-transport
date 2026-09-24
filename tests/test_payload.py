@@ -54,18 +54,22 @@ def _robot():
 
 
 def test_climb_torque_matches_the_documented_derivation():
-    """robot.yaml's comment: 90 kg on 20 deg needs 76.5 N*m; 45 kg on 10 deg 28.3."""
+    """robot.yaml's derivation (r = 0.24): 90 kg on 20 deg needs 66.9 N*m;
+    45 kg on 10 deg 24.8 (x 1.5 margin -> the 37.2 cap)."""
     from env.payload import climb_torque_per_wheel_nm
 
     r = _robot()["wheel_radius_m"]
-    assert climb_torque_per_wheel_nm(76.2 + 90.0, 20.0, r) == pytest.approx(76.5, abs=0.1)
-    assert climb_torque_per_wheel_nm(76.2 + 45.0, 10.0, r) == pytest.approx(28.3, abs=0.1)
+    assert climb_torque_per_wheel_nm(76.2 + 90.0, 20.0, r) == pytest.approx(66.9, abs=0.1)
+    assert climb_torque_per_wheel_nm(76.2 + 45.0, 10.0, r) == pytest.approx(24.8, abs=0.1)
+    assert 1.5 * climb_torque_per_wheel_nm(76.2 + 45.0, 10.0, r) == pytest.approx(
+        _robot()["actuator"]["effort_limit_sim"], abs=0.1
+    )
     assert climb_torque_per_wheel_nm(100.0, 0.0, r) == 0.0
 
 
 def test_slope_axis_20deg_at_nominal_payload_is_infeasible():
-    """The slope sweep pins payload at the eval nominal (25 kg): 15 deg is
-    climbable, 20 deg needs 46.6 N*m > the 42.5 cap -- impossible for ANY policy."""
+    """The slope sweep pins payload at the eval nominal (25 kg): 15 deg needs
+    30.8 N*m (climbable), 20 deg needs 40.7 > the 37.2 cap -- impossible for ANY policy."""
     from env.payload import climb_feasible
 
     robot = _robot()
