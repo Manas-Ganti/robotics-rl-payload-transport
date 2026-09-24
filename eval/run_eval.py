@@ -45,6 +45,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-envs", type=int, default=None)
     parser.add_argument("--tag", type=str, default=None, help="Suffix for output filenames")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override a TRAIN-config key the eval env reuses, e.g. "
+        "robot.usd_path=/path/carter_v1.usd (same semantics as training/train.py)",
+    )
 
     try:
         from isaaclab.app import AppLauncher
@@ -174,7 +182,8 @@ def main() -> None:
     from env.config import Config, load_eval_config
     from env.nav_env import TransportNavEnv, build_env_cfg
     from eval.ood_harness import OODHarness
-    from training.train import set_global_seed
+    from env.config import validate_train_config
+    from training.train import apply_overrides, set_global_seed
 
     # Loading this asserts the train/OOD split before anything else happens.
     eval_cfg = load_eval_config(args.config)
@@ -193,7 +202,8 @@ def main() -> None:
     # observation layout are identical -- only the env count, the seed, and the
     # source of the domain parameters differ. Anything else would make the
     # comparison to training performance invalid.
-    train_data = dict(data["train"])
+    train_data = apply_overrides(dict(data["train"]), args.set)
+    validate_train_config(train_data)
     train_data["env"] = {**train_data["env"], "num_envs": int(data["eval"]["num_envs"])}
     train_data["seed"] = int(data["seed"])
     train_cfg = Config(train_data, source=args.config)
