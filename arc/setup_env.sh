@@ -147,6 +147,18 @@ if np_major >= 2:
     print("  FAIL numpy >= 2: Isaac Sim 4.x needs numpy 1.x"); bad = True
 sys.exit(1 if bad else 0)
 EOF
+  # A later `pip install` can silently break an earlier package's pins (seen:
+  # wandb pulling protobuf 7 under isaaclab_rl's <5). pip only WARNS at install
+  # time, so fail here on any conflict involving the Isaac packages.
+  say "dependency conflicts (pip check, Isaac packages)"
+  local conflicts
+  conflicts="$("$PY" -m pip check 2>/dev/null | grep -iE '^(isaac|rsl)' || true)"
+  if [[ -n "$conflicts" ]]; then
+    echo "$conflicts" | sed 's/^/  /'
+    die "dependency conflicts above -- fix before running on a GPU node"
+  fi
+  echo "  none"
+
   say "pure-logic tests (no GPU, no Isaac)"
   (cd "$REPO_ROOT" && "$PY" -m pytest tests/ -q)
   say "VERIFY OK. Next: the smoke test -- see setup_notes.md Part 3."

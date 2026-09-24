@@ -18,6 +18,9 @@ pyyaml>=6.0
 
 # ---- experiment tracking ----
 wandb>=0.16.0
+protobuf>=3.20.2,<5       # Isaac Lab (isaaclab_rl / isaaclab_tasks) requires <5. Without this
+                          # cap, the newest wandb drags protobuf to 7.x and breaks them;
+                          # pip then picks a wandb release that accepts protobuf 4.x.
 
 # ---- RL (A100 only; rsl_rl expects torch to already be present) ----
 rsl-rl-lib>=2.0.2         # Already installed by `isaaclab.sh --install rsl_rl`
