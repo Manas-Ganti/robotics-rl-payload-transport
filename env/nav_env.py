@@ -36,7 +36,13 @@ import numpy as np
 import torch
 
 from env.config import Config, get_train_ranges
-from env.payload import PayloadSpec, apply_mass_modifier, set_payload_mass_batched
+from env.payload import (
+    PayloadSpec,
+    apply_mass_modifier,
+    author_payload_link,
+    set_link_payload_mass,
+    set_payload_mass_batched,
+)
 from env.randomization import DomainSampler, EpisodeParams, resolve_physics_material
 from env.reward import RewardConfig, RewardState, compute_reward
 from env.spaces import ActionSpec, ObservationSpec, build_observation_spec
@@ -350,6 +356,21 @@ class TransportNavEnv(DirectRLEnv):
         self._spawn_ground()
         self._spawn_obstacle_pool()
 
+        # The deck payload is part of the ROBOT articulation, so it must exist
+        # in env_0 before cloning replicates env_0 to every env.
+        payload_cfg = self._raw["payload"]
+        if bool(payload_cfg["enabled"]) and str(payload_cfg["attach_mode"]) == "deck_link":
+            import omni.usd  # noqa: PLC0415
+
+            author_payload_link(
+                omni.usd.get_context().get_stage(),
+                robot_path="/World/envs/env_0/Robot",
+                chassis_name=str(self._raw["robot"]["base_body_name"]),
+                offset_root_m=payload_cfg["offset_m"],
+                size_m=payload_cfg["size_m"],
+                nominal_mass_kg=float(np.mean(self._raw["domain"]["train"]["payload_mass_kg"])),
+            )
+
         # Clone per-env prims BEFORE spawning anything global.
         # VERIFY ON A100: `copy_from_source=False` is the fast path but requires
         # that per-env prims are never structurally edited afterwards -- which is
@@ -454,8 +475,8 @@ class TransportNavEnv(DirectRLEnv):
         self.payload_enabled = bool(payload_cfg["enabled"])
         self.payload = None
 
-        if not self.payload_enabled or self.payload_mode == "mass_modifier":
-            return
+        if not self.payload_enabled or self.payload_mode in ("mass_modifier", "deck_link"):
+            return  # deck_link is authored before cloning (see _setup_scene)
 
         # The weld that would attach this box to the chassis
         # (env/payload.py::attach_payload_joint) is not yet called anywhere, so
@@ -1054,7 +1075,23 @@ class TransportNavEnv(DirectRLEnv):
         )
         idx = env_ids if torch.is_tensor(env_ids) else torch.tensor(env_ids)
 
-        if self.payload_mode == "mass_modifier":
+        if self.payload_mode == "deck_link":
+            if not hasattr(self, "_payload_body_id"):
+                body_ids, _ = self.robot.find_bodies("payload")
+                if len(body_ids) != 1:
+                    raise RuntimeError(
+                        f"deck_link payload body not found in the articulation. "
+                        f"Bodies: {self.robot.body_names}"
+                    )
+                self._payload_body_id = int(body_ids[0])
+            set_link_payload_mass(
+                self.robot,
+                body_index=self._payload_body_id,
+                masses_kg=masses,
+                size_m=self._raw["payload"]["size_m"],
+                env_ids=idx,
+            )
+        elif self.payload_mode == "mass_modifier":
             if not hasattr(self, "_default_body_masses"):
                 # Snapshot the USD masses BEFORE the first write, so payload is
                 # added on top of the robot's real chassis mass every episode

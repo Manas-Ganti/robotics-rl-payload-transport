@@ -286,24 +286,38 @@ def setup_logging(cfg: Any, data: Dict[str, Any]) -> str:
 
 
 def _robot_footprint_radius(prim_path: str = "/World/envs/env_0/Robot") -> Optional[float]:
-    """Half-diagonal of env_0's robot x-y bounding box (m), from the live stage.
+    """Farthest collision-shape corner from the robot root in x-y (m), from the live stage.
 
     Compared against solvability.robot_radius_m: the A* check inflates
     obstacles by that radius, so a wider robot makes "solvable" a lie.
+    Extents are computed from each collision shape's own attributes
+    (ComputeExtentFromPlugins) -- Carter's authored extents are stale, and
+    BBoxCache on them reported a 1716 m robot.
     """
     try:
         import math
 
         import omni.usd
-        from pxr import Usd, UsdGeom
+        from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
         stage = omni.usd.get_context().get_stage()
-        cache = UsdGeom.BBoxCache(
-            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.guide]
-        )
-        box = cache.ComputeWorldBound(stage.GetPrimAtPath(prim_path)).ComputeAlignedRange()
-        size = box.GetMax() - box.GetMin()
-        return 0.5 * math.hypot(size[0], size[1]) * UsdGeom.GetStageMetersPerUnit(stage)
+        root = stage.GetPrimAtPath(prim_path)
+        xf = UsdGeom.XformCache()
+        to_root = xf.GetLocalToWorldTransform(root).GetInverse()
+        far = 0.0
+        for prim in Usd.PrimRange(root):
+            if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                continue
+            ext = UsdGeom.Boundable.ComputeExtentFromPlugins(UsdGeom.Boundable(prim), Usd.TimeCode.Default())
+            if not ext:
+                continue
+            m = xf.GetLocalToWorldTransform(prim) * to_root
+            for x in (ext[0][0], ext[1][0]):
+                for y in (ext[0][1], ext[1][1]):
+                    for z in (ext[0][2], ext[1][2]):
+                        c = m.Transform(Gf.Vec3d(x, y, z))
+                        far = max(far, math.hypot(c[0], c[1]))
+        return far * UsdGeom.GetStageMetersPerUnit(stage)
     except Exception as exc:  # diagnostic only -- never fail the smoke test on it
         print(f"  (footprint check unavailable: {exc})")
         return None
@@ -394,7 +408,14 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     phys_fric = mats[:, 0, 0]
     print(f"  friction (PhysX)  : {phys_fric.min().item():.2f} - {phys_fric.max().item():.2f}")
     phys_mass = None
-    if getattr(env, "payload_mode", "") == "mass_modifier" and hasattr(env, "_chassis_body_id"):
+    if getattr(env, "payload_mode", "") == "deck_link" and hasattr(env, "_payload_body_id"):
+        phys_mass = env.robot.root_physx_view.get_masses()[:, env._payload_body_id]
+        total = env.robot.root_physx_view.get_masses().sum(dim=-1)
+        print(
+            f"  payload link mass : {phys_mass.min().item():.2f} - {phys_mass.max().item():.2f} kg "
+            f"(robot total {total.min().item():.1f} - {total.max().item():.1f} kg)"
+        )
+    elif getattr(env, "payload_mode", "") == "mass_modifier" and hasattr(env, "_chassis_body_id"):
         masses = env.robot.root_physx_view.get_masses()[:, env._chassis_body_id]
         base = env._default_body_masses[0, env._chassis_body_id].item()
         phys_mass = masses
@@ -415,14 +436,22 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     obs, _ = env.reset()
     z_spawn = env.robot.data.root_pos_w[:, 2].clone()
     idle = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
-    max_tilt = 0.0
+    env_tilt = torch.zeros(env.num_envs, device=env.device)
+    pitch_sign = torch.zeros(env.num_envs, device=env.device)
     for _ in range(25):   # 0.5 s, no command: does it land and sit level?
         env.step(idle)
         g = env.robot.data.projected_gravity_b  # (N, 3); (0,0,-1) when level
         tilt = torch.rad2deg(torch.acos(torch.clamp(-g[:, 2], -1.0, 1.0)))
-        max_tilt = max(max_tilt, float(tilt.max().item()))
+        worse = tilt > env_tilt
+        pitch_sign = torch.where(worse, torch.sign(g[:, 0]), pitch_sign)
+        env_tilt = torch.maximum(env_tilt, tilt)
+    max_tilt = float(env_tilt.max().item())
     drop = float((z_spawn - env.robot.data.root_pos_w[:, 2]).mean().item())
-    print(f"  spawn settle      : dropped {drop:+.3f} m, max tilt {max_tilt:.1f} deg (0.5 s idle)")
+    heavy = env.payload_mass >= env.payload_mass.median()
+    print(f"  spawn settle      : dropped {drop:+.3f} m, max tilt {max_tilt:.1f} deg (0.5 s idle); "
+          f"light-half max {env_tilt[~heavy].max().item():.1f}, heavy-half max {env_tilt[heavy].max().item():.1f}; "
+          f"{int((env_tilt > 20).sum().item())} envs > 20 deg "
+          f"(gravity-x sign at worst tilt: {pitch_sign[env_tilt > 20].tolist()[:8]})")
 
     obs, _ = env.reset()
     yaw0 = env._robot_yaw().clone()
@@ -505,8 +534,8 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
         print("  FAIL: PhysX ground friction is identical across envs -- the write in")
         print("        _apply_friction did not land. The friction axis is INERT.")
     if phys_mass is not None and float(phys_mass.max() - phys_mass.min()) < 1e-6:
-        print("  FAIL: PhysX chassis mass is identical across envs -- the payload axis")
-        print("        is INERT (apply_mass_modifier did not land).")
+        print("  FAIL: PhysX payload mass is identical across envs -- the payload axis")
+        print("        is INERT (the mass write in _apply_payload_mass did not land).")
     if first_step_terms > 0.5 * env.num_envs:
         print("  FAIL: most envs terminated on the very first step. That is ground")
         print("        contact being counted as collision -- check the filtered contact")

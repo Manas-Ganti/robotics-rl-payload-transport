@@ -392,7 +392,7 @@ there is real data:
 2. **Obstacle pool cap of 48/env** bounds the achievable density. If
    `TerrainFactory` warns that the cap bound before the density target was met,
    the high-density curve is flattened by the *scene budget*, not the policy.
-3. **Payload attach mode is `mass_modifier`** (fast, no separate body; `rigid_body_with_joint` is not wired — the weld is never created, so selecting it raises).
+3. **Payload attach mode is `deck_link`**: a payload body fixed-jointed to the chassis inside the articulation (as Carter's own ballast is), placed on the top deck inside the support triangle; PhysX composes mass, COM and inertia. `mass_modifier` (chassis mass only) tipped Carter up to 52° in the smoke test; `rigid_body_with_joint` is not wired.
    Switch to `rigid_body_with_joint` before drawing conclusions from the v2
    transport reward — penalizing jerk to protect a payload with no independent
    dynamics is not measuring what it claims to.

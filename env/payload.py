@@ -27,6 +27,16 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 
+# deck_link (default): a payload rigid body fixed-jointed to the chassis, INSIDE
+#   the articulation -- the same way Carter's own 20 kg ballast (com_offset) is
+#   modelled. PhysX composes mass, centre of mass and inertia exactly.
+# mass_modifier: adds mass to the chassis body only. Kept for comparison, but
+#   it leaves the chassis COM and inertia unchanged -- on Carter (two front
+#   wheels + one rear caster, no front support) that tipped robots up to 52 deg.
+# rigid_body_with_joint: a free rigid body welded after cloning. NOT wired.
+ATTACH_MODES = ("deck_link", "mass_modifier", "rigid_body_with_joint")
+
+
 @dataclass(frozen=True)
 class PayloadSpec:
     """Resolved payload configuration for one episode."""
@@ -41,11 +51,8 @@ class PayloadSpec:
     def __post_init__(self) -> None:
         if self.mass_kg < 0:
             raise ValueError(f"payload mass must be >= 0, got {self.mass_kg}")
-        if self.attach_mode not in ("mass_modifier", "rigid_body_with_joint"):
-            raise ValueError(
-                f"attach_mode must be 'mass_modifier' or 'rigid_body_with_joint', "
-                f"got {self.attach_mode!r}"
-            )
+        if self.attach_mode not in ATTACH_MODES:
+            raise ValueError(f"attach_mode must be one of {ATTACH_MODES}, got {self.attach_mode!r}")
 
     @classmethod
     def from_config(cls, cfg: Any, *, mass_kg: float) -> "PayloadSpec":
@@ -202,6 +209,93 @@ def attach_payload_joint(
     joint.CreateBody1Rel().SetTargets([payload_prim_path])
     joint.CreateLocalPos0Attr().Set(Gf.Vec3f(*(float(v) for v in offset_m)))
     joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+
+
+def author_payload_link(
+    stage: Any,
+    robot_path: str,
+    chassis_name: str,
+    offset_root_m: Sequence[float],
+    size_m: Sequence[float],
+    nominal_mass_kg: float,
+) -> str:
+    """Author a payload body inside env_0's robot, fixed-jointed to the chassis.
+
+    Call BEFORE ``clone_environments`` so every env gets it. The body becomes an
+    articulation link (as Carter's ``com_offset`` ballast is), so PhysX composes
+    the robot's total mass, centre of mass and inertia itself -- no hand-derived
+    combination to get wrong. It has NO collision shape: it is load, not a
+    bumper (the collision sensor watches the chassis only).
+
+    ``offset_root_m`` is the payload's centre in the ROBOT ROOT frame; the
+    joint's chassis-side frame is derived from the stage, so a chassis_link that
+    is offset or rotated relative to the root is handled.
+
+    VERIFY ON ARC: the smoke test lists "payload" among robot.body_names, and
+    its PhysX mass reads back across the sampled range.
+    """
+    from pxr import Gf, UsdGeom, UsdPhysics  # noqa: PLC0415  (lazy: Isaac-only)
+
+    robot = stage.GetPrimAtPath(robot_path)
+    chassis = stage.GetPrimAtPath(f"{robot_path}/{chassis_name}")
+    if not robot or not chassis:
+        raise RuntimeError(f"cannot author payload: missing {robot_path} or its '{chassis_name}' body")
+
+    body_path = f"{robot_path}/payload"
+    body = UsdGeom.Xform.Define(stage, body_path)
+    body.AddTranslateOp().Set(Gf.Vec3d(*(float(v) for v in offset_root_m)))
+    UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+    mass_api = UsdPhysics.MassAPI.Apply(body.GetPrim())
+    mass_api.CreateMassAttr(float(nominal_mass_kg))
+    mass_api.CreateCenterOfMassAttr(Gf.Vec3f(0.0, 0.0, 0.0))
+    mass_api.CreateDiagonalInertiaAttr(Gf.Vec3f(*box_inertia_diagonal(nominal_mass_kg, size_m)))
+
+    # Joint frame on the chassis side = the payload's pose expressed in the
+    # chassis frame (USD row-vector convention: local * parent_to_world).
+    xf = UsdGeom.XformCache()
+    payload_to_world = xf.GetLocalToWorldTransform(body.GetPrim())
+    rel = payload_to_world * xf.GetLocalToWorldTransform(chassis).GetInverse()
+    joint = UsdPhysics.FixedJoint.Define(stage, f"{robot_path}/payload_joint")
+    joint.CreateBody0Rel().SetTargets([chassis.GetPath()])
+    joint.CreateBody1Rel().SetTargets([body.GetPath()])
+    joint.CreateLocalPos0Attr().Set(Gf.Vec3f(rel.ExtractTranslation()))
+    joint.CreateLocalRot0Attr().Set(Gf.Quatf(rel.ExtractRotationQuat()))
+    joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+    joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
+    return body_path
+
+
+def set_link_payload_mass(
+    robot: Any,
+    body_index: int,
+    masses_kg: Any,
+    size_m: Sequence[float],
+    env_ids: Optional[Any] = None,
+) -> None:
+    """Per-env payload mass on the deck link, with its box inertia to match.
+
+    PhysX does not rescale inertia when mass changes, so the inertia is written
+    alongside: a uniform box of this mass (diagonal, about the link origin,
+    which is the payload centre). Full-tensor read-modify-write with CPU
+    indices, as in Isaac Lab's randomize_rigid_body_mass.
+    """
+    import torch  # noqa: PLC0415  (lazy: Isaac-only)
+
+    view = robot.root_physx_view
+    idx = (
+        torch.arange(view.count) if env_ids is None else torch.as_tensor(env_ids)
+    ).long().cpu()
+    masses = view.get_masses().clone()
+    inertias = view.get_inertias().clone()  # (N, B, 9), row-major 3x3
+    m = torch.as_tensor(masses_kg, dtype=masses.dtype).reshape(-1).cpu()
+    w, d, h = (float(v) for v in size_m)
+    masses[idx, body_index] = m
+    inertias[idx, body_index] = 0.0
+    inertias[idx, body_index, 0] = m / 12.0 * (d * d + h * h)
+    inertias[idx, body_index, 4] = m / 12.0 * (w * w + h * h)
+    inertias[idx, body_index, 8] = m / 12.0 * (w * w + d * d)
+    view.set_masses(masses, idx)
+    view.set_inertias(inertias, idx)
 
 
 def set_payload_mass_batched(

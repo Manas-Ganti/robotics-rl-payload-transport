@@ -76,17 +76,23 @@ robot:
 # ---------------------------------------------------------------------------
 payload:
   enabled: true
-  attach_mode: "mass_modifier"   # "mass_modifier" | "rigid_body_with_joint"
-  # mass_modifier         : adds the payload to the chassis body's USD mass.
-  #                         Fast; no separate body, so no load-shift dynamics.
-  # rigid_body_with_joint : NOT WIRED (the FixedJoint weld is never created;
-  #                         selecting it raises). Needed before interpreting the
-  #                         v2 jerk/energy terms as "protecting the payload".
+  # deck_link (default): a payload body fixed-jointed to the chassis inside
+  #   the articulation -- exactly how Carter's own 20 kg ballast (com_offset)
+  #   is modelled. PhysX composes total mass, COM and inertia; a heavier load
+  #   genuinely raises the centre of mass.
+  # mass_modifier: adds mass to chassis_link only (COM + inertia unchanged).
+  #   On Carter (2 front wheels + 1 rear caster, no front support) it pushed the
+  #   COM toward the axle and tipped robots up to 52 deg in the ARC smoke test.
+  # rigid_body_with_joint: NOT WIRED (raises).
+  attach_mode: "deck_link"
   shape: "box"
-  size_m: [0.12, 0.12, 0.10]
-  offset_m: [0.0, 0.0, 0.30]   # relative to base_body_name origin (deck height; PENDING)
-  # VERIFY ON A100: rigid-body payload requires a FixedJoint between payload and
-  #                 chassis; see env/payload.py::attach_payload.
+  size_m: [0.40, 0.30, 0.20]   # a tote; sets the payload's own inertia
+  # Payload centre in the ROBOT ROOT frame (measured with arc/inspect_usd.py):
+  #   z: chassis collision box top = 0.137 + 0.542/2 = 0.408; + half height 0.10
+  #   x: inside the support triangle -- drive axle at x ~ 0.00, caster contact
+  #      at x ~ -0.354. -0.12 sits a third of the way back, so the load cannot
+  #      move the COM forward of the axle (the no-front-support tip direction).
+  offset_m: [-0.12, 0.0, 0.508]
 
 # ---------------------------------------------------------------------------
 # SENSORS
