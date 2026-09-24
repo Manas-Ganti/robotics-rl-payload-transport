@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from env.solvability import (
+    edge_mask,
     SolvabilityResult,
     UnsolvableLayoutError,
     astar,
@@ -299,3 +300,55 @@ class TestPathLength:
 
     def test_diagonal_costs_sqrt_two(self):
         assert path_length_cells([(0, 0), (1, 1)]) == pytest.approx(np.sqrt(2))
+
+
+# ---------------------------------------------------------------------------
+# Patch edge: the whole robot must stay on the ground
+# ---------------------------------------------------------------------------
+class TestEdgeClearance:
+    def test_edge_mask_band_width(self):
+        """0.25 m cells, 0.55 m clearance: centres at 0.125 and 0.375 m from the
+        edge are inside the band, 0.625 m is not -- 2 cells per side."""
+        mask = edge_mask(40, 0.25, 0.55)
+        assert mask[0, 20] and mask[1, 20] and not mask[2, 20]
+        assert mask[20, 39] and mask[20, 38] and not mask[20, 37]
+        assert not mask[20, 20]
+
+    def test_zero_clearance_blocks_nothing(self):
+        assert not edge_mask(40, 0.25, 0.0).any()
+
+    def test_start_on_the_edge_is_rejected(self):
+        result = check_solvable(
+            empty_grid(40), (0, 20), (39, 20), robot_radius_m=0.1, resolution_m=0.25,
+            edge_clearance_m=0.55,
+        )
+        assert not result.solvable and result.reason == "start_blocked_after_inflation"
+
+    def test_default_keeps_old_behaviour(self):
+        result = check_solvable(empty_grid(40), (0, 20), (39, 20), robot_radius_m=0.1, resolution_m=0.25)
+        assert result.solvable
+
+    def test_generated_episodes_keep_the_robot_on_the_patch(self):
+        """End-to-end over the real config: every start, goal AND A* path cell is
+        at least one robot radius from the patch edge (the Carter tail-down bug)."""
+        from pathlib import Path
+
+        from env.config import load_train_config
+        from env.randomization import EpisodeParams
+        from env.terrain_factory import TerrainFactory
+
+        cfg = load_train_config(Path(__file__).resolve().parent.parent / "configs" / "train.yaml")
+        factory = TerrainFactory(cfg)
+        half = factory.size_m / 2.0
+        rng = np.random.default_rng(1)
+        for density in (0.2, 0.6, 0.9):
+            params = EpisodeParams(
+                obstacle_density=density, slope_angle_deg=0.0, friction_coeff=0.7,
+                payload_mass_kg=25.0, depth_dropout_prob=0.0, depth_noise_std=0.0,
+            )
+            for _ in range(10):
+                spec = factory.generate(params, rng)
+                for x, y in (spec.start_xy, spec.goal_xy):
+                    assert half - max(abs(x), abs(y)) >= factory.robot_radius_m - 1e-9
+                for cell in spec.optimal_path_cells:
+                    assert not factory.edge_band[cell], f"path cell {cell} inside the edge band"

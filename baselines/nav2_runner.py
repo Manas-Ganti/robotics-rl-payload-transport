@@ -192,10 +192,14 @@ class Nav2Policy:
         stage while eliminating any chance of the baseline failing an episode
         that the harness guaranteed was achievable.
         """
-        from env.solvability import world_to_grid
+        from env.solvability import edge_mask, world_to_grid
 
         radius_cells = radius_to_cells(self.cfg.robot_radius_m, spec.resolution_m)
         planning_grid = inflate_occupancy(spec.occupancy, radius_cells)
+        # Nav2's costmap is bounded by the map: keep the footprint on the patch,
+        # exactly as the solvability check does, or the baseline would plan
+        # along the edge and "fail" episodes the harness certified achievable.
+        planning_grid |= edge_mask(planning_grid.shape[0], spec.resolution_m, self.cfg.robot_radius_m)
 
         start = world_to_grid(
             robot_xy, terrain_size_m=spec.size_m, resolution_m=spec.resolution_m

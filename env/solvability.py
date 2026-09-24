@@ -147,6 +147,24 @@ def inflate_occupancy(grid: np.ndarray, radius_cells: int) -> np.ndarray:
     return inflated
 
 
+def edge_mask(n_cells: int, resolution_m: float, clearance_m: float) -> np.ndarray:
+    """Cells whose CENTRE is closer than ``clearance_m`` to the patch boundary.
+
+    Obstacle inflation cannot see the patch edge -- it lies outside the grid --
+    so without this a start, goal or path cell may sit right at the edge with
+    half the robot hanging off the patch. With clearance = robot radius, the
+    whole robot footprint stays on the ground. (ARC smoke test: Carter's rear
+    caster, 0.43 m behind the axle, overhung the edge on ~11% of starts and
+    the robot tipped tail-down.)
+    """
+    if clearance_m <= 0:
+        return np.zeros((n_cells, n_cells), dtype=bool)
+    idx = np.arange(n_cells)
+    # distance from each cell centre to the nearest edge along each axis
+    edge_dist = np.minimum(idx + 0.5, n_cells - idx - 0.5) * resolution_m
+    return (edge_dist[:, None] < clearance_m) | (edge_dist[None, :] < clearance_m)
+
+
 def radius_to_cells(radius_m: float, resolution_m: float) -> int:
     """Convert a physical clearance radius to a (ceiled) cell count.
 
@@ -324,8 +342,12 @@ def check_solvable(
     resolution_m: float,
     connectivity: int = 8,
     require_clearance: bool = True,
+    edge_clearance_m: float = 0.0,
 ) -> SolvabilityResult:
     """Verify a start->goal path exists with robot-radius clearance.
+
+    ``edge_clearance_m`` > 0 also blocks the band along the patch boundary
+    (see :func:`edge_mask`), which obstacle inflation cannot see.
 
     This is the function every generated episode must pass before spawning.
     The returned ``path_length_m`` is the OPTIMAL path length, which becomes the
@@ -337,12 +359,15 @@ def check_solvable(
     if require_clearance:
         radius_cells = radius_to_cells(robot_radius_m, resolution_m)
         planning_grid = inflate_occupancy(occupied, radius_cells)
+    if edge_clearance_m > 0:
+        planning_grid = planning_grid | edge_mask(occupied.shape[0], resolution_m, edge_clearance_m)
 
-        # Inflation can bury the endpoints themselves. That means the start or
-        # goal is too close to an obstacle for the robot to physically occupy,
-        # so the layout is genuinely invalid -- report it distinctly rather than
-        # as a generic "no path", because the fix is different (move the
-        # endpoints, not thin the obstacles).
+    # Inflation (or the edge band) can bury the endpoints themselves. That means
+    # the start or goal is too close to an obstacle or the patch edge for the
+    # robot to physically occupy, so the layout is genuinely invalid -- report
+    # it distinctly rather than as a generic "no path", because the fix is
+    # different (move the endpoints, not thin the obstacles).
+    if require_clearance or edge_clearance_m > 0:
         if planning_grid[start]:
             return SolvabilityResult(False, reason="start_blocked_after_inflation")
         if planning_grid[goal]:

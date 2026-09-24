@@ -26,6 +26,7 @@ from env.solvability import (
     Cell,
     SolvabilityResult,
     check_solvable,
+    edge_mask,
     generate_until_solvable,
     grid_dim,
     grid_to_world,
@@ -180,6 +181,9 @@ class TerrainFactory:
         self.require_clearance: bool = bool(solv_cfg["require_clearance"])
 
         self.n_cells: int = grid_dim(self.size_m, self.resolution_m)
+        # Start/goal/path cells must keep the WHOLE robot on the patch: a band
+        # one robot radius wide along the boundary is excluded (edge_mask).
+        self.edge_band: np.ndarray = edge_mask(self.n_cells, self.resolution_m, self.robot_radius_m)
 
         if self.min_start_goal_distance_m >= self.size_m * math.sqrt(2.0):
             raise ValueError(
@@ -213,6 +217,7 @@ class TerrainFactory:
                 resolution_m=self.resolution_m,
                 connectivity=self.connectivity,
                 require_clearance=self.require_clearance,
+                edge_clearance_m=self.robot_radius_m,
             )
 
         spec, result, attempts = generate_until_solvable(
@@ -363,7 +368,9 @@ class TerrainFactory:
         placed across the contour would leave slope nearly irrelevant, and the
         Phase 2 curve would flatten for the wrong reason.
         """
-        free = np.argwhere(~occupancy)
+        # Never sample inside the edge band: the robot would overhang the patch
+        # (Carter's caster tipped it tail-down on ~11% of starts).
+        free = np.argwhere(~occupancy & ~self.edge_band)
         if len(free) < 2:
             return None
 

@@ -446,6 +446,13 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
         pitch_sign = torch.where(worse, torch.sign(g[:, 0]), pitch_sign)
         env_tilt = torch.maximum(env_tilt, tilt)
     max_tilt = float(env_tilt.max().item())
+    # Evidence, not a guess: how close to the patch edge did the tilted robots
+    # start? (All starts should now be >= solvability.robot_radius_m inside.)
+    half = float(env._raw["env"]["terrain_size_m"]) / 2.0
+    edge_dist = half - env.start_pos.abs().max(dim=-1)[0]
+    tilted = env_tilt > 20
+    print(f"  start edge dist   : min {edge_dist.min().item():.2f} m over all envs; "
+          f"tilted envs: {[round(v, 2) for v in edge_dist[tilted].tolist()][:8]}")
     drop = float((z_spawn - env.robot.data.root_pos_w[:, 2]).mean().item())
     heavy = env.payload_mass >= env.payload_mass.median()
     print(f"  spawn settle      : dropped {drop:+.3f} m, max tilt {max_tilt:.1f} deg (0.5 s idle); "
