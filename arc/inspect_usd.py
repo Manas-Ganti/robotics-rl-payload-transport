@@ -41,10 +41,12 @@ def main(path: str) -> None:
     root = stage.GetDefaultPrim() or stage.GetPseudoRoot()
     print(f"default prim: {root.GetPath()}")
 
+    # Real points only (useExtentsHint=False): authored extent hints on these
+    # assets can be stale or in other units, which produced a "3 km" robot.
     cache = UsdGeom.BBoxCache(
         Usd.TimeCode.Default(),
-        [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.guide],
-        useExtentsHint=True,
+        [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.guide, UsdGeom.Tokens.proxy],
+        useExtentsHint=False,
     )
     xf = UsdGeom.XformCache()
 
@@ -81,31 +83,61 @@ def main(path: str) -> None:
         if kind == "PhysicsRevoluteJoint" and "wheel" in prim.GetName().lower():
             wheel_joints.append((prim.GetName(), b1[0] if b1 else ""))
 
-    # ---- geometry: footprint, root height, wheels ------------------------------
-    print("\n-- geometry (metres) --")
-    rb = _bbox(cache, root)
-    if rb:
-        lo, hi = rb
-        dx, dy, dz = (hi[i] - lo[i] for i in range(3))
-        radius = 0.5 * math.hypot(dx, dy) * mpu
-        root_z = xf.GetLocalToWorldTransform(root).ExtractTranslation()[2]
-        print(f"  overall size       : {dx * mpu:.3f} x {dy * mpu:.3f} x {dz * mpu:.3f}")
-        print(f"  footprint radius   : {radius:.3f}  (half-diagonal of the x-y extent)")
-        print(f"  root above lowest  : {(root_z - lo[2]) * mpu:.3f}  (spawn height must be >= this)")
+    # ---- collision geometry: what physics actually touches -------------------
+    # Footprint, spawn height and wheel radius come from COLLISION shapes only;
+    # visual meshes can be offset, oversized, or carry junk extents.
+    print("\n-- collision shapes (metres) --")
+    union_lo = [math.inf] * 3
+    union_hi = [-math.inf] * 3
+    shapes_by_body = {}
+    for prim in stage.Traverse():
+        if not prim.HasAPI(UsdPhysics.CollisionAPI):
+            continue
+        body = prim
+        while body and not body.HasAPI(UsdPhysics.RigidBodyAPI):
+            body = body.GetParent()
+        bname = body.GetName() if body else "?"
+        box = _bbox(cache, prim)
+        detail = ""
+        if prim.IsA(UsdGeom.Cylinder) or prim.IsA(UsdGeom.Sphere) or prim.IsA(UsdGeom.Capsule):
+            scale = xf.GetLocalToWorldTransform(prim).ExtractRotationMatrix().GetRow(0).GetLength()
+            detail = f" radius_attr={prim.GetAttribute('radius').Get()} (x world scale {scale:.4f})"
+        if box:
+            lo, hi = box
+            size = [(hi[i] - lo[i]) * mpu for i in range(3)]
+            for i in range(3):
+                union_lo[i] = min(union_lo[i], lo[i] * mpu)
+                union_hi[i] = max(union_hi[i], hi[i] * mpu)
+            shapes_by_body.setdefault(bname, []).append((lo, hi))
+            print(f"  {bname:<18} {prim.GetTypeName():<10} size={['%.3f' % v for v in size]}{detail}  {prim.GetPath()}")
+        else:
+            print(f"  {bname:<18} {prim.GetTypeName():<10} (no computable bounds){detail}  {prim.GetPath()}")
 
+    if union_hi[0] > union_lo[0]:
+        dx, dy, dz = (union_hi[i] - union_lo[i] for i in range(3))
+        root_z = xf.GetLocalToWorldTransform(root).ExtractTranslation()[2] * mpu
+        print("\n-- derived (collision geometry) --")
+        print(f"  collision size     : {dx:.3f} x {dy:.3f} x {dz:.3f}")
+        print(f"  footprint radius   : {0.5 * math.hypot(dx, dy):.3f}  (half-diagonal of x-y extent)")
+        print(f"  root above lowest  : {root_z - union_lo[2]:.3f}  (spawn height must be >= this)")
+
+    for name, body_path in wheel_joints:
+        wheel = stage.GetPrimAtPath(body_path).GetName() if stage.GetPrimAtPath(body_path) else ""
+        boxes = shapes_by_body.get(wheel, [])
+        if boxes:
+            lo = [min(b[0][i] for b in boxes) for i in range(3)]
+            hi = [max(b[1][i] for b in boxes) for i in range(3)]
+            center = [(lo[i] + hi[i]) / 2 * mpu for i in range(3)]
+            print(f"  wheel {name:<12}: radius ~{(hi[2] - lo[2]) / 2 * mpu:.4f} (half collision height)  "
+                  f"center={['%.3f' % c for c in center]}")
     centers = {}
     for name, body_path in wheel_joints:
         prim = stage.GetPrimAtPath(body_path)
-        if not prim:
-            continue
-        box = _bbox(cache, prim)
-        if box:
-            lo, hi = box
-            centers[name] = [(lo[i] + hi[i]) / 2 * mpu for i in range(3)]
-            print(f"  wheel {name:<18}: radius ~{(hi[2] - lo[2]) / 2 * mpu:.4f}  center={['%.3f' % c for c in centers[name]]}")
+        if prim:
+            centers[name] = list(xf.GetLocalToWorldTransform(prim).ExtractTranslation() * mpu)
     if len(centers) >= 2:
         (n1, c1), (n2, c2) = list(centers.items())[:2]
-        print(f"  wheel separation   : {math.dist(c1, c2):.4f}  ({n1} <-> {n2})")
+        print(f"  wheel separation   : {math.dist(c1, c2):.4f}  (joint-frame origins {n1} <-> {n2})")
 
 
 if __name__ == "__main__":
