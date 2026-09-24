@@ -45,7 +45,10 @@ sim:
     solver_position_iteration_count: 4
     solver_velocity_iteration_count: 0
     gpu_max_rigid_contact_count: 8388608
-    gpu_found_lost_pairs_capacity: 2097152
+    # 2048 envs x 48 obstacles needed 2,312,192 (PhysX error on ARC at 2^21:
+    # "otherwise, the simulation will miss interactions" -- i.e. silently
+    # dropped contacts). 2^22 gives ~1.8x headroom.
+    gpu_found_lost_pairs_capacity: 4194304
 
 env:
   num_envs: 2048

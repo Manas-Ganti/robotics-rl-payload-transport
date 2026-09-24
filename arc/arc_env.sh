@@ -82,6 +82,17 @@ arc_notify_finish() {
   out="$(scontrol show job "${SLURM_JOB_ID:-0}" 2>/dev/null | sed -n 's/.*StdOut=//p')"
   local tail_txt=""
   [[ -f "$out" ]] && tail_txt="$(cut -c1-180 "$out" | tail -n 25)"
+  # PhysX reports buffer overflows ("...will miss interactions") as log lines,
+  # not exceptions: the run continues with silently dropped contacts. Surface
+  # them at the end of the log, where they cannot scroll past unnoticed.
+  local physx_err=0
+  [[ -f "$out" ]] && physx_err="$(grep -c 'PhysX error' "$out" || true)"
+  if [[ "$physx_err" -gt 0 ]]; then
+    echo "[arc_env] WARNING: ${physx_err} 'PhysX error' line(s) in this log -- results may be invalid:"
+    grep -m 5 'PhysX error' "$out" | cut -c1-240
+    tail_txt="PHYSX ERRORS: ${physx_err}
+${tail_txt}"
+  fi
   arc_notify "[rtn] ${SLURM_JOB_NAME:-job} ${SLURM_JOB_ID:-} exit=$rc on $(hostname)
 ${tail_txt}"
   return $rc
