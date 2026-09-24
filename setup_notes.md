@@ -134,6 +134,17 @@ risk is real: no RT cores, rendering unsupported, headless physics only.)
 These produce **no error**. If any one is broken, the corresponding robustness
 curve is a flat artifact that reads as an exciting finding.
 
+- [ ] **Ground contact is not a "collision"** — collisions come from the
+      contact sensor *filtered to obstacles* (`force_matrix_w`), never the net
+      force (which includes ground support). The smoke test prints `FAIL:` if
+      > 90% of random-action episodes end in collision.
+
+- [ ] **Friction reaches the contact, not just the ground** — the ground uses
+      `friction_combine_mode="min"`, so contact friction = min(ground, wheel).
+      With PhysX's default "average", a 0.1 ground under a ~1.0 wheel would act
+      like ~0.55 and compress the whole low-friction OOD range. Verify the
+      wheel material friction is ≥ 0.9.
+
 - [ ] **Per-env friction actually changes** — `env/nav_env.py::_apply_friction`
       Verify `root_physx_view.set_material_properties(props, indices)` signature
       and that the shape axis is right.
@@ -379,7 +390,7 @@ there is real data:
 2. **Obstacle pool cap of 48/env** bounds the achievable density. If
    `TerrainFactory` warns that the cap bound before the density target was met,
    the high-density curve is flattened by the *scene budget*, not the policy.
-3. **Payload attach mode defaults to `mass_modifier`** (fast, no separate body).
+3. **Payload attach mode is `mass_modifier`** (fast, no separate body; `rigid_body_with_joint` is not wired — the weld is never created, so selecting it raises).
    Switch to `rigid_body_with_joint` before drawing conclusions from the v2
    transport reward — penalizing jerk to protect a payload with no independent
    dynamics is not measuring what it claims to.

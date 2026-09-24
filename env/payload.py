@@ -230,20 +230,23 @@ def set_payload_mass_batched(
     """
     import torch  # noqa: PLC0415  (lazy: A100-only import)
 
-    masses = torch.as_tensor(masses_kg, dtype=torch.float32)
-    if masses.dim() == 1:
-        masses = masses.unsqueeze(-1)  # (num_envs,) -> (num_envs, 1 body)
-
+    # Read-modify-write the FULL (num_envs, num_bodies) CPU tensor, then write
+    # back with indices (Isaac Lab's randomize_rigid_body_mass pattern).
     view = payload_object.root_physx_view
-    indices = env_ids if env_ids is not None else torch.arange(masses.shape[0])
-    view.set_masses(masses.cpu(), indices.cpu() if hasattr(indices, "cpu") else indices)
+    all_masses = view.get_masses().clone()
+    idx = (
+        torch.arange(all_masses.shape[0]) if env_ids is None else torch.as_tensor(env_ids)
+    ).long().cpu()
+    values = torch.as_tensor(masses_kg, dtype=all_masses.dtype).reshape(-1).cpu()
+    all_masses[idx, 0] = values
+    view.set_masses(all_masses, idx)
 
 
 def apply_mass_modifier(
     robot: Any,
-    base_mass_kg: float,
     payload_masses_kg: Any,
     body_index: int,
+    default_masses: Any,
     env_ids: Optional[Any] = None,
 ) -> None:
     """Cheap payload mode: fold payload mass into the chassis body mass.
@@ -256,19 +259,26 @@ def apply_mass_modifier(
     conclusions from the transport-aware v2 reward: penalizing jerk to protect a
     payload that has no independent dynamics is not measuring what it claims to.
 
-    VERIFY ON A100: same set_masses signature caveats as
-    :func:`set_payload_mass_batched`.
+    chassis mass = the USD's own chassis mass (``default_masses``, snapshotted
+    before the first write) + this episode's payload. Using the real USD mass
+    rather than a config constant means the payload-to-robot ratio reported in
+    the write-up is the one the simulator actually ran.
+
+    PhysX view tensors are CPU-side; indices must be CPU too. Full-tensor
+    read-modify-write, as in Isaac Lab's randomize_rigid_body_mass.
+    VERIFY ON ARC: the smoke test's chassis-mass spread matches the payload
+    range (read back from the view, not from our own buffers).
     """
     import torch  # noqa: PLC0415  (lazy: A100-only import)
 
-    payload = torch.as_tensor(payload_masses_kg, dtype=torch.float32).reshape(-1)
-    total = payload + float(base_mass_kg)
-
     view = robot.root_physx_view
     masses = view.get_masses().clone()
-    indices = env_ids if env_ids is not None else torch.arange(masses.shape[0])
-    masses[indices, body_index] = total.to(masses.device)
-    view.set_masses(masses.cpu(), indices.cpu() if hasattr(indices, "cpu") else indices)
+    idx = (
+        torch.arange(masses.shape[0]) if env_ids is None else torch.as_tensor(env_ids)
+    ).long().cpu()
+    payload = torch.as_tensor(payload_masses_kg, dtype=masses.dtype).reshape(-1).cpu()
+    masses[idx, body_index] = default_masses[idx, body_index] + payload
+    view.set_masses(masses, idx)
 
 
 def summarize_payload(

@@ -349,6 +349,26 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
         pose_err = max(pose_err, float(err.max().item()))
     print(f"  obstacle pose err : {pose_err:.3f} m (max |sim - spec| over active obstacles)")
 
+    # Physical readback: what PhysX actually holds, not what we meant to write.
+    mats = env.ground.root_physx_view.get_material_properties()
+    phys_fric = mats[:, 0, 0]
+    print(f"  friction (PhysX)  : {phys_fric.min().item():.2f} - {phys_fric.max().item():.2f}")
+    phys_mass = None
+    if getattr(env, "payload_mode", "") == "mass_modifier" and hasattr(env, "_chassis_body_id"):
+        masses = env.robot.root_physx_view.get_masses()[:, env._chassis_body_id]
+        base = env._default_body_masses[0, env._chassis_body_id].item()
+        phys_mass = masses
+        print(
+            f"  chassis mass      : {masses.min().item():.2f} - {masses.max().item():.2f} kg "
+            f"(USD chassis {base:.2f} kg + payload)"
+        )
+    # step() auto-resets finished envs, wiping their live flags; the env
+    # snapshots each outcome into EpisodeRecords just before that reset.
+    records = env.drain_completed_episodes()
+    ended = len(records)
+    collided = sum(r.collided for r in records)
+    print(f"  episodes ended    : {ended} ({collided} by collision)")
+
     hit_frac = None
     if env.obs_spec.has("depth"):
         final_depth = obs["policy"] if isinstance(obs, dict) else obs
@@ -370,6 +390,16 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     if hit_frac is not None and hit_frac < 0.01:
         print("  FAIL: almost no ray hits anything. With obstacles present this means")
         print("        the sensor is blind (check sensors.modality and obstacle_valid).")
+    if float(phys_fric.max() - phys_fric.min()) < 1e-6:
+        print("  FAIL: PhysX ground friction is identical across envs -- the write in")
+        print("        _apply_friction did not land. The friction axis is INERT.")
+    if phys_mass is not None and float(phys_mass.max() - phys_mass.min()) < 1e-6:
+        print("  FAIL: PhysX chassis mass is identical across envs -- the payload axis")
+        print("        is INERT (apply_mass_modifier did not land).")
+    if ended > 0 and collided / ended > 0.9:
+        print("  FAIL: >90% of episodes end in 'collision' under random actions. That")
+        print("        is ground contact being counted, not obstacles -- check the")
+        print("        filtered contact sensor (force_matrix_w) in _detect_collision.")
     if float(env.friction.max() - env.friction.min()) < 1e-6:
         print("  FAIL: friction is identical across envs. The friction axis is INERT;")
         print("        its OOD curve would be a flat artifact. See _apply_friction.")

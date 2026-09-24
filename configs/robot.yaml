@@ -42,11 +42,12 @@ robot:
 # ---------------------------------------------------------------------------
 payload:
   enabled: true
-  attach_mode: "rigid_body_with_joint"   # "mass_modifier" | "rigid_body_with_joint"
-  # mass_modifier         : cheapest -- scales the base body's mass in-place.
-  # rigid_body_with_joint : physical box spawned on the chassis, fixed-jointed.
-  #                         Slower but produces real load-shift dynamics, which
-  #                         is what the transport-aware v2 reward cares about.
+  attach_mode: "mass_modifier"   # "mass_modifier" | "rigid_body_with_joint"
+  # mass_modifier         : adds the payload to the chassis body's USD mass.
+  #                         Fast; no separate body, so no load-shift dynamics.
+  # rigid_body_with_joint : NOT WIRED (the FixedJoint weld is never created;
+  #                         selecting it raises). Needed before interpreting the
+  #                         v2 jerk/energy terms as "protecting the payload".
   shape: "box"
   size_m: [0.12, 0.12, 0.10]
   offset_m: [0.0, 0.0, 0.08]   # relative to base_body_name origin

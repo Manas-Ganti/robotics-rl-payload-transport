@@ -214,10 +214,16 @@ def build_env_cfg(cfg: Config) -> TransportNavEnvCfg:
 
     # -- contact sensor ----------------------------------------------------
     # VERIFY ON A100: prim path must match the robot's chassis body name.
+    # FILTERED to obstacles: the chassis rests on the ground (via its caster),
+    # so the NET contact force always exceeds the collision threshold and every
+    # episode would "collide" on step one. With filter_prim_paths_expr set, the
+    # sensor also reports force_matrix_w = chassis-vs-obstacle forces only.
+    # (One sensor body vs many filtered bodies is the supported direction.)
     out.contact_sensor = ContactSensorCfg(
         prim_path=f"/World/envs/env_.*/Robot/{robot_cfg['base_body_name']}",
         history_length=int(sensors_cfg["contact"]["history_length"]),
         track_air_time=bool(sensors_cfg["contact"]["track_air_time"]),
+        filter_prim_paths_expr=["/World/envs/env_.*/Obstacle_.*"],
     )
 
     # -- exteroceptive sensor ---------------------------------------------
@@ -248,7 +254,7 @@ def build_env_cfg(cfg: Config) -> TransportNavEnvCfg:
             ),
             max_distance=float(rc["max_range_m"]),
             update_period=float(rc["update_period_s"]),
-            mesh_prim_paths=["/World/ground", "/World/envs/env_.*/Obstacles"],
+            mesh_prim_paths=["/World/envs/env_.*/Ground", "/World/envs/env_.*/Obstacle_.*"],
         )
     else:
         raise NotImplementedError(
@@ -366,8 +372,19 @@ class TransportNavEnv(DirectRLEnv):
                 size=(size, size, 0.1),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                 collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+                # combine mode "min": PhysX blends the two touching materials'
+                # friction ("average" by default), so a 0.1 ground under a ~1.0
+                # wheel would act like ~0.55 and the whole low-friction OOD
+                # range would be compressed. "min" outranks "average" in PhysX's
+                # combine priority, so contact friction = min(ground, wheel) =
+                # the SAMPLED ground value (wheels are grippier than 0.9).
+                # VERIFY ON ARC: wheel material friction >= 0.9.
                 physics_material=sim_utils.RigidBodyMaterialCfg(
-                    static_friction=0.7, dynamic_friction=0.63, restitution=0.0
+                    static_friction=0.7,
+                    dynamic_friction=0.63,
+                    restitution=0.0,
+                    friction_combine_mode="min",
+                    restitution_combine_mode="min",
                 ),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.3, 0.3, 0.35)),
             ),
@@ -397,7 +414,9 @@ class TransportNavEnv(DirectRLEnv):
         self.obstacles: List[RigidObject] = []
         for i in range(self.max_obstacles):
             obstacle_cfg = RigidObjectCfg(
-                prim_path=f"/World/envs/env_.*/Obstacles/Obstacle_{i}",
+                # Directly under the env prim: spawning creates only the leaf,
+                # so an intermediate "Obstacles/" group would not exist yet.
+                prim_path=f"/World/envs/env_.*/Obstacle_{i}",
                 spawn=sim_utils.CylinderCfg(
                     radius=float(slot_radii[i]),
                     height=height,
@@ -415,7 +434,7 @@ class TransportNavEnv(DirectRLEnv):
         # cannot rescale a cloned collision shape per env). TerrainFactory draws
         # obstacles from these slots (Obstacle.slot), which is what keeps the sim
         # consistent with the solvability guarantee.
-        # VERIFY ON ARC: each env_.*/Obstacles/Obstacle_k prim has radius
+        # VERIFY ON ARC: each env_.*/Obstacle_k prim has radius
         # slot_radii[k] (print a few from the stage after cloning).
 
     def _spawn_payload(self) -> None:
@@ -427,6 +446,17 @@ class TransportNavEnv(DirectRLEnv):
 
         if not self.payload_enabled or self.payload_mode == "mass_modifier":
             return
+
+        # The weld that would attach this box to the chassis
+        # (env/payload.py::attach_payload_joint) is not yet called anywhere, so
+        # the box would spawn loose at each env origin -- a stray obstacle, not
+        # a payload, and an inert payload axis. Refuse rather than run that.
+        raise NotImplementedError(
+            "payload.attach_mode='rigid_body_with_joint' is not wired: the FixedJoint "
+            "weld is never created, so the payload would not ride on the robot. Use "
+            "attach_mode='mass_modifier' (default) until the weld is implemented and "
+            "verified (needed before interpreting reward v2's jerk/energy terms)."
+        )
 
         from env.payload import build_payload_cfg
 
@@ -732,10 +762,19 @@ class TransportNavEnv(DirectRLEnv):
         catches brief impacts that a single-frame read would miss between policy
         steps -- with decimation=4, a single-frame check misses most real hits.
         """
-        forces = self.contact_sensor.data.net_forces_w_history
-        magnitudes = torch.norm(forces, dim=-1)
-        peak = magnitudes.max(dim=1)[0].max(dim=-1)[0]
-        return peak > self.collision_threshold
+        data = self.contact_sensor.data
+        # Chassis-vs-OBSTACLE forces only (see build_env_cfg). Never the net
+        # force: that includes ground support and would flag every step.
+        history = getattr(data, "force_matrix_w_history", None)
+        if history is not None:   # (N, T, B, M, 3) where available
+            magnitudes = torch.norm(history, dim=-1).flatten(start_dim=1)
+        else:                     # (N, B, M, 3): current frame only
+            magnitudes = torch.norm(data.force_matrix_w, dim=-1).flatten(start_dim=1)
+        # VERIFY ON ARC: current-frame only can miss an impact that starts and
+        # ends between policy steps; a robot driving INTO a kinematic obstacle
+        # stays in contact, so this is expected to be rare. Only the chassis is
+        # sensed -- a wheel-only side swipe is not counted.
+        return magnitudes.max(dim=-1)[0] > self.collision_threshold
 
     # ------------------------------------------------------------------
     # Termination
@@ -882,7 +921,11 @@ class TransportNavEnv(DirectRLEnv):
         poses: List[List[float]] = []
         for env_id, spec in zip(env_ids, specs):
             origin = self.scene.env_origins[env_id]
-            half_angle = math.radians(spec.params.slope_angle_deg) / 2.0
+            # NEGATIVE rotation about +y: R_y(+t) maps +x to (cos t, 0, -sin t),
+            # i.e. +x DOWNHILL -- the opposite of TerrainSpec.height_at, which
+            # (with start/goal placement and obstacle heights) assumes +x
+            # uphill. R_y(-t) maps +x to (cos t, 0, +sin t): surface z = x tan t.
+            half_angle = -math.radians(spec.params.slope_angle_deg) / 2.0
             poses.append(
                 [
                     float(origin[0]), float(origin[1]), float(origin[2]) - 0.05,
@@ -908,14 +951,21 @@ class TransportNavEnv(DirectRLEnv):
         the robot visibly slips. Do not trust the absence of an error.
         """
         materials = [resolve_physics_material(spec.params) for spec in specs]
-        props = torch.tensor(
+        values = torch.tensor(
             [[m["static_friction"], m["dynamic_friction"], m["restitution"]] for m in materials],
             dtype=torch.float32,
-        ).unsqueeze(1)  # (num_envs, 1 shape, 3)
+        )  # (len(env_ids), 3)
 
+        # Read-modify-write the FULL (num_envs, num_shapes, 3) CPU tensor, then
+        # write it back with the indices -- the pattern Isaac Lab's own
+        # randomize_rigid_body_material event uses. Passing only the reset rows
+        # would misassign materials to the wrong envs.
         idx = torch.tensor(env_ids, dtype=torch.long)
         try:
-            self.ground.root_physx_view.set_material_properties(props.cpu(), idx.cpu())
+            view = self.ground.root_physx_view
+            props = view.get_material_properties().clone()
+            props[idx] = values.to(props.dtype).unsqueeze(1)  # broadcast over shapes
+            view.set_material_properties(props, idx)
         except (AttributeError, RuntimeError) as exc:  # pragma: no cover - A100 only
             raise RuntimeError(
                 "Failed to set per-env friction. The friction study axis would be "
@@ -966,11 +1016,18 @@ class TransportNavEnv(DirectRLEnv):
         idx = env_ids if torch.is_tensor(env_ids) else torch.tensor(env_ids)
 
         if self.payload_mode == "mass_modifier":
+            if not hasattr(self, "_default_body_masses"):
+                # Snapshot the USD masses BEFORE the first write, so payload is
+                # added on top of the robot's real chassis mass every episode
+                # (never accumulated across resets).
+                self._default_body_masses = self.robot.root_physx_view.get_masses().clone()
+                body_ids, _ = self.robot.find_bodies(str(self._raw["robot"]["base_body_name"]))
+                self._chassis_body_id = int(body_ids[0])
             apply_mass_modifier(
                 self.robot,
-                base_mass_kg=float(self._raw["robot"]["base_mass_kg"]),
                 payload_masses_kg=masses,
-                body_index=0,
+                body_index=self._chassis_body_id,
+                default_masses=self._default_body_masses,
                 env_ids=idx,
             )
         else:
