@@ -132,7 +132,11 @@ terrain:
   # Budget check: 0.30 * 81 m^2 / (pi * 0.5^2 avg) ~= 31 obstacles -> 48 has headroom.
   max_obstacles_per_env: 48
   start_goal_clearance_m: 1.0  # keep start/goal cells obstacle-free
-  max_generation_attempts: 50  # solvability regeneration budget before widening
+  # Solvability regeneration budget. Measured with arc/solvability_sweep.py for
+  # Carter (robot_radius 0.55): density 0.9 needed up to 43 attempts (mean 9.9,
+  # ~19 ms/reset); 100 gives headroom so the OOD sweep's hundreds of 0.9
+  # layouts cannot exhaust it. Raise this BEFORE touching the density range.
+  max_generation_attempts: 100
   # NOTE: terrain is NOT built with isaaclab.terrains TerrainImporter. That API
   # generates one shared sub-terrain grid, which cannot give each env its own
   # per-episode obstacle layout and slope. Instead env/terrain_factory.py emits a
