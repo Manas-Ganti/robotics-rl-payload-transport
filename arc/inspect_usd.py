@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 import sys
 
-from pxr import Usd, UsdGeom, UsdPhysics, UsdUtils
+from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdUtils
 
 
 def _bbox(cache: UsdGeom.BBoxCache, prim: Usd.Prim):
@@ -84,60 +84,63 @@ def main(path: str) -> None:
             wheel_joints.append((prim.GetName(), b1[0] if b1 else ""))
 
     # ---- collision geometry: what physics actually touches -------------------
-    # Footprint, spawn height and wheel radius come from COLLISION shapes only;
-    # visual meshes can be offset, oversized, or carry junk extents.
-    print("\n-- collision shapes (metres) --")
-    union_lo = [math.inf] * 3
-    union_hi = [-math.inf] * 3
-    shapes_by_body = {}
+    # Extents are COMPUTED from each shape's own attributes (Cube.size,
+    # Cylinder.radius/height, mesh points) via ComputeExtentFromPlugins, then
+    # the 8 corners are transformed to world. Authored `extent` attributes on
+    # these assets are stale (a 0.48 m wheel reported as 55 m), so neither
+    # BBoxCache nor extentsHint can be trusted here. Only prims under the
+    # default prim count -- that is all Isaac Lab references into the scene.
+    print("\n-- collision shapes (metres, computed from shape attributes) --")
+    root_path = root.GetPath()
+    world = {}
     for prim in stage.Traverse():
-        if not prim.HasAPI(UsdPhysics.CollisionAPI):
+        if not prim.HasAPI(UsdPhysics.CollisionAPI) or not prim.GetPath().HasPrefix(root_path):
             continue
+        boundable = UsdGeom.Boundable(prim)
+        ext = UsdGeom.Boundable.ComputeExtentFromPlugins(boundable, Usd.TimeCode.Default()) if boundable else None
+        if not ext:
+            print(f"  (no extent) {prim.GetPath()}")
+            continue
+        m = xf.GetLocalToWorldTransform(prim)
+        corners = [m.Transform(Gf.Vec3d(x, y, z)) for x in (ext[0][0], ext[1][0])
+                   for y in (ext[0][1], ext[1][1]) for z in (ext[0][2], ext[1][2])]
+        lo = [min(c[i] for c in corners) * mpu for i in range(3)]
+        hi = [max(c[i] for c in corners) * mpu for i in range(3)]
         body = prim
         while body and not body.HasAPI(UsdPhysics.RigidBodyAPI):
             body = body.GetParent()
         bname = body.GetName() if body else "?"
-        box = _bbox(cache, prim)
-        detail = ""
-        if prim.IsA(UsdGeom.Cylinder) or prim.IsA(UsdGeom.Sphere) or prim.IsA(UsdGeom.Capsule):
-            scale = xf.GetLocalToWorldTransform(prim).ExtractRotationMatrix().GetRow(0).GetLength()
-            detail = f" radius_attr={prim.GetAttribute('radius').Get()} (x world scale {scale:.4f})"
-        if box:
-            lo, hi = box
-            size = [(hi[i] - lo[i]) * mpu for i in range(3)]
-            for i in range(3):
-                union_lo[i] = min(union_lo[i], lo[i] * mpu)
-                union_hi[i] = max(union_hi[i], hi[i] * mpu)
-            shapes_by_body.setdefault(bname, []).append((lo, hi))
-            print(f"  {bname:<18} {prim.GetTypeName():<10} size={['%.3f' % v for v in size]}{detail}  {prim.GetPath()}")
-        else:
-            print(f"  {bname:<18} {prim.GetTypeName():<10} (no computable bounds){detail}  {prim.GetPath()}")
+        world.setdefault(bname, []).append((lo, hi))
+        size = [hi[i] - lo[i] for i in range(3)]
+        center = [(hi[i] + lo[i]) / 2 for i in range(3)]
+        print(f"  {bname:<18} {prim.GetTypeName():<9} size={['%.3f' % v for v in size]} "
+              f"center={['%.3f' % v for v in center]}")
 
-    if union_hi[0] > union_lo[0]:
-        dx, dy, dz = (union_hi[i] - union_lo[i] for i in range(3))
+    allb = [b for boxes in world.values() for b in boxes]
+    if allb:
+        lo = [min(b[0][i] for b in allb) for i in range(3)]
+        hi = [max(b[1][i] for b in allb) for i in range(3)]
+        dx, dy, dz = (hi[i] - lo[i] for i in range(3))
         root_z = xf.GetLocalToWorldTransform(root).ExtractTranslation()[2] * mpu
         print("\n-- derived (collision geometry) --")
         print(f"  collision size     : {dx:.3f} x {dy:.3f} x {dz:.3f}")
-        print(f"  footprint radius   : {0.5 * math.hypot(dx, dy):.3f}  (half-diagonal of x-y extent)")
-        print(f"  root above lowest  : {root_z - union_lo[2]:.3f}  (spawn height must be >= this)")
+        print(f"  x range / y range  : [{lo[0]:.3f}, {hi[0]:.3f}] / [{lo[1]:.3f}, {hi[1]:.3f}]")
+        print(f"  footprint radius   : {math.hypot(max(abs(lo[0]), abs(hi[0])), max(abs(lo[1]), abs(hi[1]))):.3f}"
+              "  (farthest x-y corner from the root -- the robot turns about the root)")
+        print(f"  root above lowest  : {root_z - lo[2]:.3f}  (spawn height must be >= this)")
 
+    wc = {}
     for name, body_path in wheel_joints:
-        wheel = stage.GetPrimAtPath(body_path).GetName() if stage.GetPrimAtPath(body_path) else ""
-        boxes = shapes_by_body.get(wheel, [])
+        prim = stage.GetPrimAtPath(body_path)
+        boxes = world.get(prim.GetName(), []) if prim else []
         if boxes:
             lo = [min(b[0][i] for b in boxes) for i in range(3)]
             hi = [max(b[1][i] for b in boxes) for i in range(3)]
-            center = [(lo[i] + hi[i]) / 2 * mpu for i in range(3)]
-            print(f"  wheel {name:<12}: radius ~{(hi[2] - lo[2]) / 2 * mpu:.4f} (half collision height)  "
-                  f"center={['%.3f' % c for c in center]}")
-    centers = {}
-    for name, body_path in wheel_joints:
-        prim = stage.GetPrimAtPath(body_path)
-        if prim:
-            centers[name] = list(xf.GetLocalToWorldTransform(prim).ExtractTranslation() * mpu)
-    if len(centers) >= 2:
-        (n1, c1), (n2, c2) = list(centers.items())[:2]
-        print(f"  wheel separation   : {math.dist(c1, c2):.4f}  (joint-frame origins {n1} <-> {n2})")
+            wc[name] = [(lo[i] + hi[i]) / 2 for i in range(3)]
+            print(f"  wheel {name:<12}: radius {(hi[2] - lo[2]) / 2:.4f}  center={['%.3f' % c for c in wc[name]]}")
+    if len(wc) >= 2:
+        (n1, c1), (n2, c2) = list(wc.items())[:2]
+        print(f"  wheel separation   : {math.dist(c1, c2):.4f}  (collision-cylinder centres {n1} <-> {n2})")
 
 
 if __name__ == "__main__":
