@@ -50,3 +50,10 @@ scenarios:
   - name: "low_friction"
     note: "held-out friction"
     params: {friction_coeff: 0.15}
+  # --- diagnostics (not portfolio clips): watch unexplained eval failures ---
+  - name: "slope_5deg"
+    note: "DIAGNOSTIC: in-distribution 5 deg slope, where every policy (even random) failed in eval"
+    params: {slope_angle_deg: 5.0}
+  - name: "slope_10deg"
+    note: "DIAGNOSTIC: 10 deg, which succeeded -- the control for slope_5deg"
+    params: {slope_angle_deg: 10.0}
