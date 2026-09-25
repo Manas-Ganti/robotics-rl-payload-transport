@@ -31,6 +31,11 @@ to **out-of-distribution (OOD) terrain, friction, and payload** — benchmarked 
 - **Do not execute, pip install, or launch simulators locally.** Write code and configs
   only. Static review is fine; running is not.
 
+**Before writing Isaac code or submitting an ARC job, read
+`docs/ISAAC_SIM_PLAYBOOK.md`.** It records every setup failure, Isaac Lab 2.1 API
+gotcha, verified number and open issue from bring-up (2026-09-24/25), so they are
+not rediscovered one GPU job at a time.
+
 **Runtime = VT ARC (SLURM), not a standalone A100 box.** Jobs run on 1 × L40S
 (RT cores -> supported Isaac Sim GPU; A100/H200 = headless-only fallback) via `arc/train.slurm` / `arc/eval.slurm`;
 install is pip Isaac Sim 4.5 + Isaac Lab v2.1 in a dedicated conda env
