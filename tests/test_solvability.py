@@ -13,6 +13,8 @@ import pytest
 
 from env.solvability import (
     edge_mask,
+    line_of_sight,
+    smooth_path,
     SolvabilityResult,
     UnsolvableLayoutError,
     astar,
@@ -352,3 +354,38 @@ class TestEdgeClearance:
                     assert half - max(abs(x), abs(y)) >= factory.robot_radius_m - 1e-9
                 for cell in spec.optimal_path_cells:
                     assert not factory.edge_band[cell], f"path cell {cell} inside the edge band"
+
+
+# ---------------------------------------------------------------------------
+# Any-angle path length (the path-efficiency denominator)
+# ---------------------------------------------------------------------------
+class TestSmoothPath:
+    def test_open_grid_gives_the_straight_line(self):
+        """8-connected A* zig-zags; smoothed, it is the Euclidean distance --
+        the length a robot actually drives. (Unsmoothed, optimal > actual on
+        nearly every episode and path efficiency clamped to 1.00 everywhere.)"""
+        r = check_solvable(empty_grid(40), (0, 0), (10, 30), robot_radius_m=0.0,
+                           resolution_m=0.25, require_clearance=False)
+        assert r.path_length_cells == pytest.approx(np.hypot(10, 30), rel=1e-6)
+        assert r.raw_path_length_cells > r.path_length_cells
+
+    def test_bounded_by_straight_line_and_zigzag(self):
+        grid = wall_grid(40, gap=30)   # detour through the gap at row 30
+        r = check_solvable(grid, (0, 0), (0, 39), robot_radius_m=0.0,
+                           resolution_m=0.25, require_clearance=False)
+        assert r.solvable
+        assert np.hypot(0, 39) - 1e-9 <= r.path_length_cells <= r.raw_path_length_cells + 1e-9
+
+    def test_smoothed_segments_never_cross_blocked_cells(self):
+        grid = wall_grid(40, gap=30)   # detour through the gap at row 30
+        r = check_solvable(grid, (0, 0), (0, 39), robot_radius_m=0.0,
+                           resolution_m=0.25, require_clearance=False)
+        pts = smooth_path(grid, r.path)
+        assert pts[0] == r.path[0] and pts[-1] == r.path[-1]
+        assert all(line_of_sight(grid, a, b) for a, b in zip(pts, pts[1:]))
+
+    def test_line_of_sight_blocked_by_a_single_cell(self):
+        grid = empty_grid(20)
+        grid[5, 5] = True
+        assert not line_of_sight(grid, (0, 0), (10, 10))
+        assert line_of_sight(grid, (0, 0), (0, 10))

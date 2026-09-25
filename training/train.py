@@ -552,25 +552,45 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     print(f"  friction probe    : launch slip {slip_hi:.2f} at mu=0.9 vs {slip_lo:.2f} at mu=0.1 "
           f"(must differ -- else the friction axis is inert)")
 
-    # Slope: on a 10 deg patch the robot must come to rest on the TILTED ground,
-    # at the same height above it as on flat ground. A wrong tilt sign puts the
-    # ground where height_at() says it is not.
-    rest_flat = None
-    heights = {}
-    for slope in (0.0, 10.0):
-        env.set_forced_params(base.with_overrides(friction_coeff=0.9, slope_angle_deg=slope))
+    # Slope rest: parked (wheels commanded to 0) for 1 s at several angles.
+    # The robot must sit on the TILTED ground at the same height as on flat
+    # ground (tilt sign/axis check) and must not drift (grip check). ARC evals
+    # failed every policy at 5 deg (robots stop ~2 m in) and 15 deg (off the
+    # patch within ~1.2 s) while 10 deg worked -- this separates geometry from
+    # traction at each angle.
+    idle = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
+
+    def park(slope: float, friction: float):
+        env.set_forced_params(base.with_overrides(friction_coeff=friction, slope_angle_deg=slope))
         env.reset()
-        for _ in range(50):   # 1 s idle to settle
-            env.step(torch.zeros(env.num_envs, env.action_spec.dim, device=env.device))
+        start = env.robot.data.root_pos_w[:, :2].clone()
+        for _ in range(50):
+            env.step(idle)
         local = env.robot.data.root_pos_w[:, :3] - env.scene.env_origins[:, :3]
         ground = torch.tensor(
             [env._terrain_specs[i].height_at(float(local[i, 0]), float(local[i, 1])) for i in range(env.num_envs)],
             device=env.device,
         )
-        heights[slope] = local[:, 2] - ground   # root height above the expected surface
-    above_flat, above_slope = heights[0.0], heights[10.0]
-    print(f"  slope probe       : root above expected ground {above_flat.mean().item():.3f} m flat vs "
-          f"{above_slope.mean().item():.3f} m on 10 deg (spread {above_slope.std().item():.3f})")
+        drift = torch.norm(env.robot.data.root_pos_w[:, :2] - start, dim=-1)
+        return local[:, 2] - ground, drift
+
+    rest = {}
+    for slope in (0.0, 5.0, 10.0, 15.0):
+        above, drift = park(slope, 0.7)
+        rest[slope] = (above, drift)
+        print(f"  slope rest {slope:>4.0f} deg: root above expected ground {above.mean().item():.3f} m "
+              f"(spread {above.std().item():.3f}); drift in 1 s: median {drift.median().item():.3f} m, "
+              f"max {drift.max().item():.3f} m  [mu 0.7]")
+    above_flat, above_slope = rest[0.0][0], rest[10.0][0]
+
+    # Slide test: parked on 15 deg (tan = 0.27). Effective tyre-floor friction
+    # below 0.27 MUST slide; above it MUST hold. Measures the friction the
+    # contact actually uses -- the eval showed identical drive times from
+    # mu 0.9 to 0.1, which real physics cannot produce.
+    _, slide_lo = park(15.0, 0.1)
+    _, slide_hi = park(15.0, 0.9)
+    print(f"  slide test 15 deg : parked drift in 1 s: median {slide_lo.median().item():.3f} m at mu 0.1 "
+          f"(must SLIDE) vs {slide_hi.median().item():.3f} m at mu 0.9 (must HOLD)")
     env.set_forced_params(None)
 
     hit_frac = None
@@ -629,6 +649,14 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
         print("  FAIL: wheel slip barely changes between friction 0.9 and 0.1 -- the")
         print("        friction axis is INERT (check the wheel material's combine mode vs")
         print("        the ground's 'min'; the higher-priority mode wins in PhysX).")
+    if slide_lo.median().item() < 0.10 or slide_hi.median().item() > 0.05:
+        print("  FAIL: slide test -- effective tyre-floor friction does not follow the")
+        print("        ground setting (mu 0.1 must slide on 15 deg, mu 0.9 must hold).")
+        print("        The friction axis is not physically live, whatever PhysX reports.")
+    for slope, (above, drift) in rest.items():
+        if drift.median().item() > 0.05:
+            print(f"  FAIL: parked robots drift at {slope:.0f} deg with mu 0.7 (median "
+                  f"{drift.median().item():.2f} m in 1 s) -- they cannot hold position.")
     if abs(above_slope.mean().item() - above_flat.mean().item()) > 0.05 or above_slope.std().item() > 0.05:
         print("  FAIL: on a 10 deg slope the robot does not rest where TerrainSpec.height_at")
         print("        puts the ground -- tilt sign/axis mismatch (_apply_ground_slope).")

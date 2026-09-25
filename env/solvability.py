@@ -57,9 +57,12 @@ class SolvabilityResult:
 
     solvable: bool
     path: Optional[List[Cell]] = None
+    # ANY-ANGLE length: the A* cell path string-pulled to line-of-sight
+    # waypoints (see smooth_path). This is the path-efficiency denominator.
     path_length_cells: float = 0.0
     path_length_m: float = 0.0
     reason: str = ""
+    raw_path_length_cells: float = 0.0   # the 8-connected zig-zag, for reference
 
     def __bool__(self) -> bool:
         return self.solvable
@@ -273,6 +276,43 @@ def _reconstruct(came_from: Dict[Cell, Cell], current: Cell) -> List[Cell]:
     return path
 
 
+def line_of_sight(grid: np.ndarray, a: Cell, b: Cell) -> bool:
+    """True if the straight segment a->b crosses no blocked cell.
+
+    Samples the segment at quarter-cell spacing (vectorised) and checks the
+    cell under each sample -- conservative, and cheap enough to run per reset.
+    """
+    (r0, c0), (r1, c1) = a, b
+    n = int(max(abs(r1 - r0), abs(c1 - c0)) * 4) + 1
+    t = np.linspace(0.0, 1.0, n + 1)
+    rows = np.rint(r0 + (r1 - r0) * t).astype(int)
+    cols = np.rint(c0 + (c1 - c0) * t).astype(int)
+    return not bool(np.asarray(grid, dtype=bool)[rows, cols].any())
+
+
+def smooth_path(grid: np.ndarray, path: Sequence[Cell]) -> List[Cell]:
+    """String-pull an A* cell path to line-of-sight waypoints (forward greedy).
+
+    WHY: 8-connected A* moves in 0/45 deg zig-zags, so its length exceeds the
+    straight lines a real robot drives. As the path-efficiency denominator it
+    made optimal/actual > 1 on nearly every episode, clamped to 1.00 -- the
+    metric read 1.00 in every eval cell and measured nothing. The smoothed
+    path is an any-angle approximation of the true shortest path, still valid
+    on the same (inflated) grid.
+    """
+    if len(path) < 3:
+        return list(path)
+    out = [path[0]]
+    i, last = 0, len(path) - 1
+    while i < last:
+        j = i + 1
+        while j + 1 <= last and line_of_sight(grid, path[i], path[j + 1]):
+            j += 1
+        out.append(path[j])
+        i = j
+    return out
+
+
 def path_length_cells(path: Sequence[Cell]) -> float:
     """Geometric length of a cell path, in cell units (diagonals cost sqrt(2))."""
     if len(path) < 2:
@@ -377,13 +417,15 @@ def check_solvable(
     if path is None:
         return SolvabilityResult(False, reason="no_path")
 
-    length_cells = path_length_cells(path)
+    raw_cells = path_length_cells(path)
+    length_cells = path_length_cells(smooth_path(planning_grid, path))
     return SolvabilityResult(
         solvable=True,
         path=path,
         path_length_cells=length_cells,
         path_length_m=length_cells * resolution_m,
         reason="ok",
+        raw_path_length_cells=raw_cells,
     )
 
 

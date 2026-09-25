@@ -57,3 +57,6 @@ scenarios:
   - name: "slope_10deg"
     note: "DIAGNOSTIC: 10 deg, which succeeded -- the control for slope_5deg"
     params: {slope_angle_deg: 10.0}
+  - name: "slope_15deg"
+    note: "DIAGNOSTIC: 15 deg is torque-feasible, yet every policy left the patch within ~1.2 s in eval"
+    params: {slope_angle_deg: 15.0}
