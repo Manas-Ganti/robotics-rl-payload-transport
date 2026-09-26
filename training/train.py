@@ -23,6 +23,7 @@ This is a hard requirement of Isaac Sim, not a style choice.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import random
 import sys
@@ -340,6 +341,14 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     import torch
 
     print(f"\n=== SMOKE TEST: {num_steps} random-action steps ===")
+
+    # Action 0 is NOT "stop": each action dim maps [-1, 1] onto its velocity
+    # range, so 0 is the range MIDPOINT (lin [-0.5, 1.5] -> 0.5 m/s forward).
+    # An earlier "parked" probe drove at 0.5 m/s because of this. The stop
+    # action is the one that maps to zero velocity on every dim.
+    stop = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
+    for i, (lo, hi) in enumerate((env.action_spec.lin_vel_range, env.action_spec.ang_vel_range)):
+        stop[:, i] = (0.0 - (hi + lo) / 2.0) / ((hi - lo) / 2.0)
     print(f"  joints : {env.robot.joint_names}")
     print(f"  bodies : {env.robot.body_names}")
     for name, act in env.robot.actuators.items():
@@ -435,7 +444,7 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     # "move" under random actions -- only commanded, isolated motions show them.
     obs, _ = env.reset()
     z_spawn = env.robot.data.root_pos_w[:, 2].clone()
-    idle = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
+    idle = stop
     env_tilt = torch.zeros(env.num_envs, device=env.device)
     pitch_sign = torch.zeros(env.num_envs, device=env.device)
     for _ in range(25):   # 0.5 s, no command: does it land and sit level?
@@ -558,38 +567,72 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
     # failed every policy at 5 deg (robots stop ~2 m in) and 15 deg (off the
     # patch within ~1.2 s) while 10 deg worked -- this separates geometry from
     # traction at each angle.
-    idle = torch.zeros(env.num_envs, env.action_spec.dim, device=env.device)
+    def park(slope: float, friction: float, label: str = ""):
+        """Hold a true STOP command for 1 s; return (height above ground, drift).
 
-    def park(slope: float, friction: float):
+        Also reports robots that are THROWN (height above the expected ground
+        > 0.35 m or vertical speed > 1 m/s at any point) with the facts that
+        could explain it, since the eval failed at 5 and 15 deg but not 10.
+        """
         env.set_forced_params(base.with_overrides(friction_coeff=friction, slope_angle_deg=slope))
         env.reset()
         start = env.robot.data.root_pos_w[:, :2].clone()
+        start_local = start - env.scene.env_origins[:, :2]
+        yaw0 = env._robot_yaw().clone()
+        max_h = torch.zeros(env.num_envs, device=env.device)
+        max_vz = torch.zeros(env.num_envs, device=env.device)
+
+        def height_now():
+            loc = env.robot.data.root_pos_w[:, :3] - env.scene.env_origins[:, :3]
+            g = torch.tensor(
+                [env._terrain_specs[i].height_at(float(loc[i, 0]), float(loc[i, 1])) for i in range(env.num_envs)],
+                device=env.device,
+            )
+            return loc[:, 2] - g
+
+        h0 = height_now()   # right after reset, before any physics step
         for _ in range(50):
-            env.step(idle)
-        local = env.robot.data.root_pos_w[:, :3] - env.scene.env_origins[:, :3]
-        ground = torch.tensor(
-            [env._terrain_specs[i].height_at(float(local[i, 0]), float(local[i, 1])) for i in range(env.num_envs)],
-            device=env.device,
-        )
+            env.step(stop)
+            max_h = torch.maximum(max_h, height_now())
+            max_vz = torch.maximum(max_vz, env.robot.data.root_lin_vel_w[:, 2].abs())
         drift = torch.norm(env.robot.data.root_pos_w[:, :2] - start, dim=-1)
-        return local[:, 2] - ground, drift
+        thrown = (max_h > 0.35) | (max_vz > 1.0)
+        if bool(thrown.any()) and label:
+            ids = thrown.nonzero().flatten().tolist()
+            print(f"    THROWN at {slope:.0f} deg: {len(ids)}/{env.num_envs} envs. First few:")
+            for i in ids[:6]:
+                spec = env._terrain_specs[i]
+                sx, sy = float(start_local[i, 0]), float(start_local[i, 1])
+                near = min((math.hypot(o.x - sx, o.y - sy) - o.radius for o in spec.obstacles), default=float("nan"))
+                print(f"      env {i:>2}: start ({sx:+.2f},{sy:+.2f}) yaw {math.degrees(float(yaw0[i])):+.0f} deg "
+                      f"(0 = facing uphill +x), height at reset {float(h0[i]):.3f}, max height {float(max_h[i]):.2f}, "
+                      f"max |vz| {float(max_vz[i]):.2f}, nearest obstacle surface {near:.2f} m, "
+                      f"payload {spec.params.payload_mass_kg:.0f} kg, obstacles {len(spec.obstacles)}")
+        return height_now(), drift, thrown
 
     rest = {}
-    for slope in (0.0, 5.0, 10.0, 15.0):
-        above, drift = park(slope, 0.7)
+    # Each angle twice in a row: if only the FIRST visit throws robots, the
+    # cause is the ground being re-posed from the previous angle.
+    for slope in (0.0, 5.0, 5.0, 10.0, 10.0, 15.0, 15.0):
+        above, drift, thrown = park(slope, 0.7, label="rest")
         rest[slope] = (above, drift)
         print(f"  slope rest {slope:>4.0f} deg: root above expected ground {above.mean().item():.3f} m "
-              f"(spread {above.std().item():.3f}); drift in 1 s: median {drift.median().item():.3f} m, "
-              f"max {drift.max().item():.3f} m  [mu 0.7]")
+              f"(spread {above.std().item():.3f}); parked drift median {drift.median().item():.3f} m, "
+              f"max {drift.max().item():.3f} m; thrown {int(thrown.sum().item())}/{env.num_envs}  [mu 0.7, STOP cmd]")
     above_flat, above_slope = rest[0.0][0], rest[10.0][0]
 
     # Slide test: parked on 15 deg (tan = 0.27). Effective tyre-floor friction
     # below 0.27 MUST slide; above it MUST hold. Measures the friction the
     # contact actually uses -- the eval showed identical drive times from
     # mu 0.9 to 0.1, which real physics cannot produce.
-    _, slide_lo = park(15.0, 0.1)
-    _, slide_hi = park(15.0, 0.9)
-    print(f"  slide test 15 deg : parked drift in 1 s: median {slide_lo.median().item():.3f} m at mu 0.1 "
+    # Slide test on 10 deg (tan = 0.176; the clean angle so far): mu 0.1 must
+    # slide, mu 0.9 must hold. Thrown robots are excluded from the median.
+    park(10.0, 0.9)   # settle the ground at 10 deg first (see the repeat test above)
+    _, lo_d, lo_t = park(10.0, 0.1)
+    _, hi_d, hi_t = park(10.0, 0.9)
+    slide_lo = lo_d[~lo_t] if bool((~lo_t).any()) else lo_d
+    slide_hi = hi_d[~hi_t] if bool((~hi_t).any()) else hi_d
+    print(f"  slide test 10 deg : parked drift in 1 s: median {slide_lo.median().item():.3f} m at mu 0.1 "
           f"(must SLIDE) vs {slide_hi.median().item():.3f} m at mu 0.9 (must HOLD)")
     env.set_forced_params(None)
 
@@ -651,12 +694,12 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
         print("        the ground's 'min'; the higher-priority mode wins in PhysX).")
     if slide_lo.median().item() < 0.10 or slide_hi.median().item() > 0.05:
         print("  FAIL: slide test -- effective tyre-floor friction does not follow the")
-        print("        ground setting (mu 0.1 must slide on 15 deg, mu 0.9 must hold).")
+        print("        ground setting (mu 0.1 must slide on 10 deg, mu 0.9 must hold).")
         print("        The friction axis is not physically live, whatever PhysX reports.")
     for slope, (above, drift) in rest.items():
         if drift.median().item() > 0.05:
-            print(f"  FAIL: parked robots drift at {slope:.0f} deg with mu 0.7 (median "
-                  f"{drift.median().item():.2f} m in 1 s) -- they cannot hold position.")
+            print(f"  FAIL: parked robots (STOP command) drift at {slope:.0f} deg with mu 0.7 "
+                  f"(median {drift.median().item():.2f} m in 1 s) -- they cannot hold position.")
     if abs(above_slope.mean().item() - above_flat.mean().item()) > 0.05 or above_slope.std().item() > 0.05:
         print("  FAIL: on a 10 deg slope the robot does not rest where TerrainSpec.height_at")
         print("        puts the ground -- tilt sign/axis mismatch (_apply_ground_slope).")

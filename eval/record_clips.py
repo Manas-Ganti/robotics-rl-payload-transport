@@ -1,7 +1,15 @@
 """Record demo MP4s of a trained policy (and baselines) -- VISUALS ONLY.
 
-Runs AFTER training, from a checkpoint, as its own short job with the renderer
-on (L40S: RT cores). It never touches training or the evaluation numbers.
+Runs AFTER training, from a checkpoint, as its own short job. It never touches
+training or the evaluation numbers.
+
+Two renderers (--renderer):
+  topdown (default): frames drawn from simulator STATE with matplotlib
+      (eval/topdown.py) -- robot, obstacles, goal, lidar rays, trail, and a
+      readout of speed / height above ground / tilt. No RTX needed.
+  isaac: Isaac Sim's RTX viewport camera. On ARC's L40S nodes this SEGFAULTED
+      at app startup (omni.kit.widget.viewport __enable_hydra_engine, headless,
+      driver 595.x) -- kept for when that is resolved.
 
     # on ARC (see arc/record.slurm)
     python eval/record_clips.py --headless --checkpoint results/runs/p1/model_final.pt \\
@@ -35,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--tag", required=True, help="output folder name, e.g. the run name")
     ap.add_argument("--policies", nargs="*", default=None, help="override record.policies")
     ap.add_argument("--scenarios", nargs="*", default=None, help="subset of scenario names")
+    ap.add_argument("--renderer", choices=["topdown", "isaac"], default="topdown")
     ap.add_argument(
         "--set", action="append", default=[], metavar="KEY=VALUE",
         help="override a TRAIN-config key, e.g. robot.usd_path=... (same as training/train.py)",
@@ -51,11 +60,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # ---- the renderer must be on to produce frames -------------------------
     from isaaclab.app import AppLauncher
 
-    args.enable_cameras = True
+    isaac_view = args.renderer == "isaac"
+    args.enable_cameras = isaac_view   # topdown needs no RTX at all
     app = AppLauncher(args).app
+
+    import math
 
     import imageio.v2 as imageio
     import torch
@@ -63,6 +74,8 @@ def main() -> None:
     import isaaclab.sim as sim_utils
     from isaaclab.envs import ViewerCfg
     from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+
+    from eval.topdown import FrameState, render_frame
 
     from env.config import Config, load_eval_config, load_yaml, validate_train_config
     from env.nav_env import TransportNavEnv, build_env_cfg
@@ -85,19 +98,53 @@ def main() -> None:
     set_global_seed(int(clips["seed"]))
 
     env_cfg = build_env_cfg(train_cfg)
-    # VERIFY ON ARC: ViewerCfg field names (Isaac Lab 2.1). origin_type
-    # "asset_root" makes the viewport camera follow env 0's robot position.
-    env_cfg.viewer = ViewerCfg(
-        eye=tuple(float(v) for v in camera["eye_offset_m"]),
-        lookat=tuple(float(v) for v in camera["lookat_offset_m"]),
-        resolution=tuple(int(v) for v in video["resolution"]),
-        origin_type="asset_root",
-        env_index=0,
-        asset_name="robot",
-    )
-    env = TransportNavEnv(env_cfg, render_mode="rgb_array")
+    if isaac_view:
+        # VERIFY ON ARC: ViewerCfg field names (Isaac Lab 2.1). origin_type
+        # "asset_root" makes the viewport camera follow env 0's robot position.
+        env_cfg.viewer = ViewerCfg(
+            eye=tuple(float(v) for v in camera["eye_offset_m"]),
+            lookat=tuple(float(v) for v in camera["lookat_offset_m"]),
+            resolution=tuple(int(v) for v in video["resolution"]),
+            origin_type="asset_root",
+            env_index=0,
+            asset_name="robot",
+        )
+    env = TransportNavEnv(env_cfg, render_mode="rgb_array" if isaac_view else None)
 
-    goal_markers = VisualizationMarkers(
+    topdown = clips["topdown"]
+    max_range = float(train_data["sensors"]["raycaster"]["max_range_m"])
+    lidar_angles = env.lidar_angles.tolist() if hasattr(env, "lidar_angles") else []
+    goal_tol = float(train_data["env"]["goal_tolerance_m"])
+
+    def topdown_frame(obs_t: Any, trail: List, title: str, t_s: float) -> Any:
+        """One frame for env 0, from state (and the lidar ranges the policy saw)."""
+        spec = env._terrain_specs[0]
+        loc = (env.robot.data.root_pos_w[0, :3] - env.scene.env_origins[0, :3]).tolist()
+        g = env.robot.data.projected_gravity_b[0]
+        tilt = math.degrees(math.acos(max(-1.0, min(1.0, -float(g[2])))))
+        above = loc[2] - spec.height_at(loc[0], loc[1])
+        speed = float(env.robot.data.root_lin_vel_b[0, 0])
+        ranges = []
+        if env.obs_spec.has("depth") and lidar_angles:
+            depth = obs_t[0, env.obs_spec.slice_of("depth")]
+            ranges = (depth * max_range if env.obs_spec.normalize else depth).tolist()
+        p = spec.params
+        state = FrameState(
+            robot_xy=(loc[0], loc[1]), yaw=float(env._robot_yaw()[0]),
+            goal_xy=tuple(spec.goal_xy), goal_tolerance=goal_tol,
+            obstacles=[(o.x, o.y, o.radius) for o in spec.obstacles],
+            patch_half=float(spec.size_m) / 2.0,
+            lidar_angles=lidar_angles, lidar_ranges=ranges, trail=trail,
+            footprint_x=tuple(topdown["footprint_x_m"]),
+            footprint_half_width=float(topdown["footprint_half_width_m"]),
+            title=title,
+            readout=(f"t={t_s:5.1f}s  v={speed:+.2f}m/s  above-ground={above:.2f}m  tilt={tilt:4.1f}deg  |  "
+                     f"slope {p.slope_angle_deg:.0f}deg  mu {p.friction_coeff:.2f}  "
+                     f"payload {p.payload_mass_kg:.0f}kg  density {p.obstacle_density:.2f}"),
+        )
+        return render_frame(state, size_px=int(topdown["size_px"]))
+
+    goal_markers = None if not isaac_view else VisualizationMarkers(
         VisualizationMarkersCfg(
             prim_path="/Visuals/GoalMarkers",
             markers={
@@ -113,6 +160,8 @@ def main() -> None:
 
     def show_goals() -> None:
         """Goal spheres at each env's goal, on the (possibly sloped) ground."""
+        if goal_markers is None:
+            return
         xy = env.goal_pos + env.scene.env_origins[:, :2]
         z = torch.tensor(
             [
@@ -162,8 +211,11 @@ def main() -> None:
                 policy.reset()
                 env.drain_completed_episodes()
                 show_goals()
-                for _ in range(3):   # let the renderer settle; first frames can be blank
-                    env.render()
+                if isaac_view:
+                    for _ in range(3):   # let the renderer settle; first frames can be blank
+                        env.render()
+                trail: List = []
+                title = f"{scenario['name']}  |  {pname}  |  take {take + 1}"
 
                 path = out_dir / f"{args.tag}_{scenario['name']}_{pname}_take{take + 1}.mp4"
                 writer = imageio.get_writer(
@@ -184,11 +236,18 @@ def main() -> None:
                         steps = step + 1
                         break   # no frame: the view already shows the next spawn
                     if step % every == 0:
-                        writer.append_data(env.render())
+                        if isaac_view:
+                            writer.append_data(env.render())
+                        else:
+                            loc = env.robot.data.root_pos_w[0, :2] - env.scene.env_origins[0, :2]
+                            trail.append((float(loc[0]), float(loc[1])))
+                            obs_now = obs["policy"] if isinstance(obs, dict) else obs
+                            writer.append_data(topdown_frame(obs_now, trail, title, (step + 1) * policy_dt))
                 writer.close()
 
                 entry = {
                     "file": path.name,
+                    "renderer": args.renderer,
                     "scenario": scenario["name"],
                     "note": scenario.get("note", ""),
                     "policy": pname,

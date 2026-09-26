@@ -21,7 +21,14 @@ video:
   pixel_format: "yuv420p"      # required for playback in browsers / Safari
   quality: 8                   # imageio 0-10 (10 = best); 8 ~ 1-3 MB per clip
 
+topdown:
+  # Default renderer (eval/topdown.py): drawn from simulator state, no RTX.
+  size_px: 720                   # square frame, multiple of 16
+  footprint_x_m: [-0.43, 0.28]   # Carter collision extent, rear..front (arc/inspect_usd.py)
+  footprint_half_width_m: 0.314
+
 camera:
+  # Only for --renderer isaac (RTX viewport; segfaulted on ARC L40S at startup).
   # Chase camera: follows env 0's robot root (position only, not yaw).
   eye_offset_m: [-4.5, -4.5, 3.5]
   lookat_offset_m: [0.0, 0.0, 0.3]
