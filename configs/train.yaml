@@ -58,6 +58,12 @@ env:
   collision_force_threshold: 1.0   # net contact force (N) counting as collision
   min_start_goal_distance_m: 6.0   # reject trivially short episodes
   terrain_size_m: 10.0         # side length of one env's terrain patch
+  # Ground slab thickness. Was 0.1 m: when a wheel sank ~6 cm into it (ARC
+  # clips, 5 deg, while driving), more than half the thickness, PhysX could
+  # resolve the contact through the wrong face and launch the robot. A thick
+  # slab keeps every penetration resolving upward. The slope is applied about
+  # the TOP surface, so thickness never changes where the ground is.
+  ground_thickness_m: 1.0
   grid_resolution_m: 0.25      # occupancy-grid cell size for terrain + solvability
 
 robot_config: "configs/robot.yaml"   # robot + sensor config lives separately

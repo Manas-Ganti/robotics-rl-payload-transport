@@ -402,7 +402,7 @@ class TransportNavEnv(DirectRLEnv):
         self._ground_cfg = RigidObjectCfg(
             prim_path="/World/envs/env_.*/Ground",
             spawn=sim_utils.CuboidCfg(
-                size=(size, size, 0.1),
+                size=(size, size, float(self._raw["env"]["ground_thickness_m"])),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                 collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
                 # combine mode "min": PhysX blends the two touching materials'
@@ -421,7 +421,9 @@ class TransportNavEnv(DirectRLEnv):
                 ),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.3, 0.3, 0.35)),
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -0.05)),
+            init_state=RigidObjectCfg.InitialStateCfg(
+                pos=(0.0, 0.0, -float(self._raw["env"]["ground_thickness_m"]) / 2.0)
+            ),
         )
         self.ground = RigidObject(self._ground_cfg)
         self.scene.rigid_objects["ground"] = self.ground
@@ -1010,10 +1012,18 @@ class TransportNavEnv(DirectRLEnv):
             # i.e. +x DOWNHILL -- the opposite of TerrainSpec.height_at, which
             # (with start/goal placement and obstacle heights) assumes +x
             # uphill. R_y(-t) maps +x to (cos t, 0, +sin t): surface z = x tan t.
-            half_angle = -math.radians(spec.params.slope_angle_deg) / 2.0
+            theta = math.radians(spec.params.slope_angle_deg)
+            half_angle = -theta / 2.0
+            # Rotate about the TOP-SURFACE centre, not the box centre: the box
+            # centre sits R_y(-t)*(0, 0, -T/2) from the env origin, so the top
+            # surface passes exactly through the origin and z = x tan(t)
+            # everywhere (TerrainSpec.height_at), for any thickness T.
+            half_t = float(self._raw["env"]["ground_thickness_m"]) / 2.0
             poses.append(
                 [
-                    float(origin[0]), float(origin[1]), float(origin[2]) - 0.05,
+                    float(origin[0]) + half_t * math.sin(theta),
+                    float(origin[1]),
+                    float(origin[2]) - half_t * math.cos(theta),
                     math.cos(half_angle), 0.0, math.sin(half_angle), 0.0,
                 ]
             )
@@ -1084,18 +1094,34 @@ class TransportNavEnv(DirectRLEnv):
             [s.height_at(*s.start_xy) for s in specs], dtype=torch.float32, device=device
         )
 
-        root_state[:, 0:2] = origins[:, :2] + starts
-        root_state[:, 2] = origins[:, 2] + heights + spawn_height
+        # Spawn ALREADY TILTED to the slope, spawn_height above the surface
+        # along its normal. A level robot dropped onto a tilted floor put a
+        # sideways-facing uphill wheel inside the ground at 15 deg (0.269 m x
+        # tan 15 = 7.2 cm > the 5 cm gap) and PhysX ejected it -- the ARC
+        # forensics showed thrown robots at 15 deg almost all faced across the
+        # slope. Tilt-matched, the clearance is the same at every angle.
+        theta = torch.tensor(
+            [math.radians(s.params.slope_angle_deg) for s in specs], dtype=torch.float32, device=device
+        )
+        normal_x, normal_z = -torch.sin(theta), torch.cos(theta)   # R_y(-t) * (0, 0, 1)
+        root_state[:, 0] = origins[:, 0] + starts[:, 0] + normal_x * spawn_height
+        root_state[:, 1] = origins[:, 1] + starts[:, 1]
+        root_state[:, 2] = origins[:, 2] + heights + normal_z * spawn_height
 
         # Face the goal at spawn. Without this the policy burns the opening
         # seconds turning around, which inflates timeout rate at high slope for
         # a reason unrelated to the terrain being studied.
+        # Orientation = tilt (about y, as the ground) composed with yaw (about
+        # z): q = q_tilt (x) q_yaw, so the robot's z axis is the ground normal.
         delta = goals - starts
         yaw = torch.atan2(delta[:, 1], delta[:, 0])
-        root_state[:, 3] = torch.cos(yaw / 2.0)   # w
-        root_state[:, 4] = 0.0                     # x
-        root_state[:, 5] = 0.0                     # y
-        root_state[:, 6] = torch.sin(yaw / 2.0)   # z
+        cy, sy = torch.cos(yaw / 2.0), torch.sin(yaw / 2.0)
+        ct, st = torch.cos(-theta / 2.0), torch.sin(-theta / 2.0)
+        # (ct, 0, st, 0) (x) (cy, 0, 0, sy), Hamilton product, (w, x, y, z)
+        root_state[:, 3] = ct * cy
+        root_state[:, 4] = st * sy
+        root_state[:, 5] = st * cy
+        root_state[:, 6] = ct * sy
         root_state[:, 7:] = 0.0                    # zero linear + angular velocity
 
         self.robot.write_root_state_to_sim(root_state, env_ids=idx)

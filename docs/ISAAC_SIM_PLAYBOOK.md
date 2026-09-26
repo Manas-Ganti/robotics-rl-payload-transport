@@ -320,7 +320,18 @@ mean anything), and (3) the trained policy, through the same harness.
   with large timeouts even for random, while 10° and 12° were fine. Not a tilt bug
   (slope probe passes). The per-episode breakdown (did robots move?) is still pending.
   Re-check in the corrected environment (`p1b` evals).
-- **Robots thrown at 5° and 15° but not 10°** (smoke test, 2026-09-26): max
+- **Slope throws, diagnosed from top-down clips (2026-09-26):**
+  - **15°:** robots airborne within 0.1 s of spawn. Forensics: thrown robots faced
+    ACROSS the slope. A level robot dropped 5 cm above a tilted floor puts the uphill
+    wheel 0.269·tan15° = 7.2 cm up, i.e. 2.2 cm inside the ground. Fix: spawn tilted
+    to the slope (`q_tilt ⊗ q_yaw`), `spawn_height` measured along the normal.
+  - **5°:** robots rest normally for about 1.3 s, then sink about 6 cm while driving
+    and are launched. The ground was a 0.1 m slab, so a >5 cm penetration can
+    resolve through the wrong face. Fix: `env.ground_thickness_m: 1.0`, rotated
+    about its top surface.
+  - Both fixes are pushed; the smoke-test throw sweep must read 0 at every angle
+    to confirm.
+- **Robots thrown at 5° and 15° but not 10°** (the original report) (smoke test, 2026-09-26): max
   1.57 / 4.71 m moved in 1 s and height spread 0.14 / 0.12 m, versus 0.000 at 0°
   and 10°. This matches the eval failures at those angles. Launch forensics (start,
   yaw vs uphill, height at reset, nearest obstacle) and a repeat-angle test are in

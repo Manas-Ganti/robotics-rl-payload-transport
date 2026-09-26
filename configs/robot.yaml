@@ -80,7 +80,9 @@ robot:
   # Spawn ------------------------------------------------------------------
   # Must be >= "root above lowest" from inspect_usd.py, or the wheels spawn
   # inside the ground and PhysX ejects the robot. Too high only costs a short drop.
-  spawn_height_m: 0.30         # root rests 0.240 m above flat ground (measured) -> ~6 cm drop
+  # Root height above the surface ALONG THE GROUND NORMAL at spawn (the robot
+  # spawns tilted to the slope). Measured rest height 0.240 m -> a 2 cm drop.
+  spawn_height_m: 0.26
   # Whole-robot mass (chassis 45.9 + 20.0 ballast + wheels 8.4 + caster 1.8 +
   # imu 0.1), for the pure payload analysis (tip-over, mass ratio). The sim
   # uses the USD masses and adds the payload to chassis_link.
