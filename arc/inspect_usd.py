@@ -126,6 +126,15 @@ def main(path: str) -> None:
             extra = f"  radius={r_world:.4f} (attr x scale, axis {axis})"
         print(f"  {bname:<18} {prim.GetTypeName():<9} size={['%.3f' % v for v in size]} "
               f"center={['%.3f' % v for v in center]}{extra}")
+        # How PhysX will ACTUALLY collide this shape (e.g. a cylinder may be a
+        # convex hull with flat faces -> edge contacts at some tilts).
+        coll_attrs = {
+            at.GetName(): at.Get()
+            for at in prim.GetAttributes()
+            if any(k in at.GetName().lower() for k in ("approximation", "convex", "customgeometry", "physxcollision", "contactoffset", "restoffset"))
+        }
+        if coll_attrs:
+            print(f"      collision attrs: {coll_attrs}")
 
     allb = [b for boxes in world.values() for b in boxes]
     if allb:

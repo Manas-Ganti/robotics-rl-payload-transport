@@ -70,7 +70,12 @@ robot:
   # slip 0.58 at ground mu 0.9 AND 0.1). Rubber on hard floor ~ 1.0 lets the
   # sampled ground friction govern (holds for wheel combine modes average /
   # min / multiply; only "max" would defeat it -- the smoke probe checks).
-  tire_friction: 1.0
+  # UPDATE (2026-09-26): 1.0 still did not work -- a valid slide test showed
+  # mu 0.1 floors barely sliding on 10 deg (the contact blends the two
+  # materials with a rule we cannot set per env). "match_ground" writes the
+  # sampled ground friction onto the tyre each episode, so any combine rule
+  # (average / min / max) yields exactly that value. A number = fixed tyre mu.
+  tire_friction: "match_ground"
 
   # Spawn ------------------------------------------------------------------
   # Must be >= "root above lowest" from inspect_usd.py, or the wheels spawn

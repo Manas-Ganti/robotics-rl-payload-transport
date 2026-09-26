@@ -610,6 +610,15 @@ def run_smoke_test(env: Any, num_steps: int = 300) -> None:
                       f"payload {spec.params.payload_mass_kg:.0f} kg, obstacles {len(spec.obstacles)}")
         return height_now(), drift, thrown
 
+    # Fine slope sweep: thrown robots at 0/10 deg = 0 but ~40% at 5/15 deg --
+    # a pattern that REPEATS instead of growing with angle. If wheel colliders
+    # are polygons (faces every N deg), throws should rise and fall periodically.
+    sweep = []
+    for slope in (2.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 14.0, 15.0, 16.0, 18.0):
+        _, _, thrown = park(slope, 0.7)
+        sweep.append(f"{slope:.0f}:{int(thrown.sum().item())}")
+    print(f"  throw sweep (deg:thrown/{env.num_envs}) : " + "  ".join(sweep))
+
     rest = {}
     # Each angle twice in a row: if only the FIRST visit throws robots, the
     # cause is the ground being re-posed from the previous angle.

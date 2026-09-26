@@ -513,7 +513,11 @@ class TransportNavEnv(DirectRLEnv):
         chassis rides clear), so one value for all robot shapes is exact.
         Same full-tensor read-modify-write as Isaac Lab's material randomizer.
         """
-        mu = float(self._raw["robot"]["tire_friction"])
+        setting = self._raw["robot"]["tire_friction"]
+        self._tire_matches_ground = str(setting) == "match_ground"
+        if self._tire_matches_ground:
+            return  # written per env, per episode, in _apply_friction
+        mu = float(setting)
         view = self.robot.root_physx_view
         props = view.get_material_properties().clone()   # (N, num_shapes, 3)
         props[..., 0] = mu            # static
@@ -1047,6 +1051,17 @@ class TransportNavEnv(DirectRLEnv):
             props = view.get_material_properties().clone()
             props[idx] = values.to(props.dtype).unsqueeze(1)  # broadcast over shapes
             view.set_material_properties(props, idx)
+            # The TYRE gets the same value. PhysX blends the two touching
+            # materials with a combine rule we do not control per env; a valid
+            # slide test on ARC showed the contact used far more grip than the
+            # ground setting (mu 0.1 barely slid on 10 deg, where >0.18 is
+            # needed to hold). With both surfaces equal, average/min/max all
+            # give exactly the sampled value, whatever the rule.
+            if getattr(self, "_tire_matches_ground", str(self._raw["robot"]["tire_friction"]) == "match_ground"):
+                rview = self.robot.root_physx_view
+                rprops = rview.get_material_properties().clone()
+                rprops[idx] = values.to(rprops.dtype).unsqueeze(1)
+                rview.set_material_properties(rprops, idx)
         except (AttributeError, RuntimeError) as exc:  # pragma: no cover - A100 only
             raise RuntimeError(
                 "Failed to set per-env friction. The friction study axis would be "
