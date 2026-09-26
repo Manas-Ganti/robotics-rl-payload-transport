@@ -223,7 +223,16 @@ Collection-bound: terrain generation plus A* runs on the CPU at every reset (use
     (`env/payload.py::author_payload_link`).
 16. **Out-of-bounds:** nothing stops a robot driving off a floating ground patch.
     Terminate on it (treated as a collision with the boundary).
-17. **Video (UNVERIFIED):**
+17. **RTX rendering segfaults on ARC L40S** (VERIFIED, 2026-09-26). With
+    `enable_cameras=True` the app loads `isaaclab.python.headless.rendering.kit`
+    and crashes in `omni.kit.widget.viewport … __enable_hydra_engine` during
+    `SimulationApp` start, before any project code runs (driver 595.x; GLFW has no
+    display). Physics-only runs are unaffected. The workaround is the default
+    **top-down renderer** (`eval/topdown.py`), which draws frames from simulator state.
+18. **Action 0 is not "stop"** when the action ranges are asymmetric. Each dim maps
+    [−1, 1] onto its range, so 0 is the **midpoint** (lin [−0.5, 1.5] → 0.5 m/s). Any
+    "parked" probe must send the action that maps to zero velocity.
+19. **Video, Isaac viewport path (UNVERIFIED; see 17):**
     - AppLauncher `enable_cameras=True`, `render_mode="rgb_array"`, and `env_cfg.viewer = ViewerCfg(origin_type="asset_root", asset_name="robot", env_index=0, …)`.
     - `env.render()` gives frames and `VisualizationMarkers` draws goal spheres.
     - See `eval/record_clips.py` / `arc/record.slurm`. Needs `imageio[ffmpeg]` and an RT-core GPU.
@@ -311,6 +320,13 @@ mean anything), and (3) the trained policy, through the same harness.
   with large timeouts even for random, while 10° and 12° were fine. Not a tilt bug
   (slope probe passes). The per-episode breakdown (did robots move?) is still pending.
   Re-check in the corrected environment (`p1b` evals).
+- **Robots thrown at 5° and 15° but not 10°** (smoke test, 2026-09-26): max
+  1.57 / 4.71 m moved in 1 s and height spread 0.14 / 0.12 m, versus 0.000 at 0°
+  and 10°. This matches the eval failures at those angles. Launch forensics (start,
+  yaw vs uphill, height at reset, nearest obstacle) and a repeat-angle test are in
+  the smoke test.
+- **Friction still unverified:** the p1b eval showed identical drive times from
+  μ 0.9 to 0.1. The first slide test was invalid (it sent action 0, see 5.18).
 - **Launch slip 0.48 at μ 0.9** is higher than rigid-body physics predicts (traction
   should exceed motor force). Suspects: PhysX convex approximation of cylinder
   wheels; the deprecated patch-friction flag on Carter's materials. The friction axis
